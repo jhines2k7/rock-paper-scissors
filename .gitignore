@@ -1,0 +1,5 @@
+.env.test
+.env.prod
+.env.local
+contracts
+.vscode
