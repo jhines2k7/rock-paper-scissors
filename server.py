@@ -96,7 +96,6 @@ def new_game_session():
   session_id = uuid.uuid4()
   games[session_id] = {
     'gameId': str(session_id),
-    'round': 1,
     'player1': {
       'id': None,
       'choice': None,
@@ -222,7 +221,8 @@ def handle_join_contract_confirmation_number_received(data):
 @socketio.on('join_contract_transaction_hash_received')
 def handle_join_contract_transaction(data):
   logger.info('join contract transaction hash: %s', data)
-  player = get_player_by_id(games[data['sessionId']], data['playerId'])
+  game = get_game_by_player_id(data['playerId'])
+  player = get_player_by_id(game, data['playerId'])
   player['joinContract']['transactionHash'] = data['transactionHash']
   player['address'] = data['address']
   player['contractAddress'] = data['contractAddress']
