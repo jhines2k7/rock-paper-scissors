@@ -43,16 +43,23 @@ load_dotenv(args.env)
 HTTP_PROVIDER = os.getenv("HTTP_PROVIDER")
 CONTRACT_OWNER_PRIVATE_KEY = os.getenv("CONTRACT_OWNER_PRIVATE_KEY")
 logger.info(f"Contract owner private key: {CONTRACT_OWNER_PRIVATE_KEY}")
+ARBITER_PRIVATE_KEY = os.getenv("ARBITER_PRIVATE_KEY")
+logger.info(f"Arbiter private key: {ARBITER_PRIVATE_KEY}")
 RPS_CONTRACT_FACTORY_ADDRESS = os.getenv("RPS_CONTRACT_FACTORY_ADDRESS")
 # Connection
 web3 = Web3(Web3.HTTPProvider(HTTP_PROVIDER))
 
+if 'test' in args.env:
+  logger.info("Running on testnet")
+  # # for Goerli, make sure to inject the poa middleware
+  web3.middleware_onion.inject(geth_poa_middleware, layer=0)
+
 # Load and parse the contract ABIs.
-factory_abi = None
-contract_abi = None
+rps_contract_factory_abi = None
+rps_contract_abi = None
 with open('contracts/RPSContractFactory.json') as f:
   factory_json = json.load(f)
-  factory_abi = factory_json['abi']
+  rps_contract_factory_abi = factory_json['abi']
 with open('contracts/RPSContract.json') as f:
   rps_json = json.load(f)
   contract_abi = rps_json['abi']
@@ -101,9 +108,16 @@ def new_game_session():
       'winner': None,
       'playerAddress': None,
       'contractAddress': None,
-      'confirmationNumber': None,
-      'transactionHash': None,
-      'receipt': None
+      'joinContract': {
+        'confirmationNumber': None,
+        'transactionHash': None,
+        'receipt': None
+      },
+      'decideWinner': {
+        'confirmationNumber': None,
+        'transactionHash': None,
+        'receipt': None
+      }
     },
     'player2': {
       'id': None,
@@ -116,9 +130,16 @@ def new_game_session():
       'winner': None,
       'playerAddress': None,
       'contractAddress': None,
-      'confirmationNumber': None,
-      'transactionHash': None,
-      'receipt': None
+      'joinContract': {
+        'confirmationNumber': None,
+        'transactionHash': None,
+        'receipt': None
+      },
+      'decideWinner': {
+        'confirmationNumber': None,
+        'transactionHash': None,
+        'receipt': None
+      }
     }
   }
 
@@ -142,7 +163,19 @@ def get_empty_player():
     'totalWinnings': 0,
     'wagerAccepted': False,
     'wagerOffered': False,
-    'winner': None
+    'winner': None,
+    'playerAddress': None,
+    'contractAddress': None,
+    'joinContract': {
+      'confirmationNumber': None,
+      'transactionHash': None,
+      'receipt': None
+    },
+    'decideWinner': {
+      'confirmationNumber': None,
+      'transactionHash': None,
+      'receipt': None
+    }
   }
 
 def get_player_by_id(game, player_id):
@@ -189,6 +222,11 @@ def handle_join_contract_confirmation_number_received(data):
 @socketio.on('join_contract_transaction_hash_received')
 def handle_join_contract_transaction(data):
   logger.info('join contract transaction hash: %s', data)
+  player = get_player_by_id(games[data['sessionId']], data['playerId'])
+  player['joinContract']['transactionHash'] = data['transactionHash']
+  player['address'] = data['address']
+  player['contractAddress'] = data['contractAddress']
+  logger.info('Current game state in on join_contract_transaction_hash_received: %s', games[data['sessionId']])
 
 @socketio.on('join_contract_transaction_receipt_received')
 def handle_join_contract_transaction(data):
@@ -347,7 +385,7 @@ def handle_accept_wager():
     # Use your deployed factory contract address
     factory_contract_address = web3.to_checksum_address(RPS_CONTRACT_FACTORY_ADDRESS)
     # Now interact with your factory contract
-    factory_contract = web3.eth.contract(address=factory_contract_address, abi=factory_abi)
+    factory_contract = web3.eth.contract(address=factory_contract_address, abi=rps_contract_factory_abi)
 
     if 'local' in args.env:
       # running locally using ganache
@@ -358,8 +396,8 @@ def handle_accept_wager():
     else:
       # running on the Goerli testnet
       logger.info("Running on Goerli testnet")
-      # for Goerli, make sure to inject the poa middleware
-      web3.middleware_onion.inject(geth_poa_middleware, layer=0)
+      # # for Goerli, make sure to inject the poa middleware
+      # web3.middleware_onion.inject(geth_poa_middleware, layer=0)
         # Set Gas Price
       gas_price = web3.eth.gas_price  # Fetch the current gas price
 
@@ -373,7 +411,7 @@ def handle_accept_wager():
         'from': web3.to_checksum_address(contract_owner_account.address),
         'nonce': nonce,
         'gas': 5000000,  # You may need to change the gas limit
-        'gasPrice': gas_price
+        'gasPrice': math.ceil(gas_price * 1.05)
       })
 
       signed = contract_owner_account.sign_transaction(construct_txn)
@@ -384,26 +422,13 @@ def handle_accept_wager():
     # Get the transaction receipt for the contract creation transaction
     tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
     logger.info(f"Transaction receipt: {tx_receipt}")
-
-    tx_receipt_log_topic_hex = tx_receipt["logs"][0]["topics"][1]
-    logger.info(f"Transaction receipt log topic hex: {tx_receipt_log_topic_hex}")
-
-    # Convert bytes value to hex and take the last 40 characters
-    address_hex = tx_receipt_log_topic_hex.hex()[-40:]
-
-    created_contract_address = None
-
-    # Add '0x' at the beginning
-    address_hex = '0x' + address_hex
-    created_contract_address = web3.to_checksum_address(address_hex)
-
+    
     # Call getContracts function
     contract_addresses = factory_contract.functions.getContracts().call()
-    logger.info(f"Contract addresses: {contract_addresses}")
-    logger.info(f"Created contract address: {created_contract_address}")
-
-    # Assert that the created contract address is equal to the last contract address in the list
-    # assert created_contract_address == contract_addresses[-1]
+    logging.info(f"Contract addresses: {contract_addresses}")
+    # Call the getLatestContract function
+    created_contract_address = factory_contract.functions.getLatestContract().call()    
+    logging.info(f"Created contract address: {created_contract_address}")
 
     emit('wager_accepted', {
       'playerId': player['id'],
@@ -522,6 +547,53 @@ def handle_choice(data):
 
       result = 'You win!' if winner_key == player_key else 'You lose!'
 
+    # call decideWinner contract function here
+    logger.info('Calling decideWinner contract function')
+    arbiter_account = Account.from_key(ARBITER_PRIVATE_KEY)
+    logging.info(f"Arbiter account address: {arbiter_account.address}")
+    winner_address = winner['playerAddress']
+    logging.info(f"Winner account address: {winner_address}")
+    rps_contract_address = web3.to_checksum_address(winner['contractAddress'])
+    logging.info(f"Contract address: {rps_contract_address}")
+    
+    # Now interact with your factory contract
+    rps_contract = web3.eth.contract(address=rps_contract_address, abi=rps_contract_abi)
+
+    tx_hash = None
+    rps_txn = None
+
+    # Set Gas Price
+    gas_price = web3.eth.gas_price  # Fetch the current gas price
+    arbiter_checksum_address = web3.to_checksum_address(arbiter_account.address)
+
+    # Sign transaction using the private key of the arbiter account
+    nonce = web3.eth.get_transaction_count(arbiter_checksum_address)  # Get the nonce
+
+    if 'local' in args.env:
+      # running locally using ganache
+      logger.info("Running locally using ganache")
+    else:
+      # running on the Goerli testnet
+      logger.info("Running on Goerli testnet")
+      # Let web3.py use PoA setting of the Goerli Testnet.
+      web3.middleware_onion.inject(geth_poa_middleware, layer=0)
+
+    rps_txn = rps_contract.functions.decideWinner(web3.to_checksum_address(winner_address)).build_transaction({
+      'from': arbiter_checksum_address,
+      'nonce': nonce,
+      'gas': 800000,  # You may need to change the gas limit
+      'gasPrice': math.ceil(gas_price * 1.05)
+    })
+
+    signed = arbiter_account.sign_transaction(rps_txn)
+    tx_hash = web3.eth.send_raw_transaction(signed.rawTransaction)
+    
+    tx_receipt = None
+
+    # Get the transaction receipt for the join contract transaction
+    tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+    print(f'Transaction receipt after decideWinner was called: {tx_receipt}')
+
     logger.info('Current game state after {} round: {}'.format(game['round'], game))
 
     emit('result',
@@ -534,7 +606,19 @@ def handle_choice(data):
       'playerId': player['id'],
       'opponentId': opponent['id'],
       'winnings': player['winnings'],
-      'totalWinnings': player['totalWinnings']
+      'totalWinnings': player['totalWinnings'],
+      'playerAddress': player['address'],
+      'contractAddress': player['contractAddress'],
+      'joinContract': {
+        'confirmationNumber': player['joinContract']['confirmationNumber'],
+        'transactionHash': player['joinContract']['transactionHash'],
+        'receipt': player['joinContract']['receipt']
+      },
+      'decideWinner': {
+        'confirmationNumber': player['decideWinner']['confirmationNumber'],
+        'transactionHash': player['decideWinner']['transactionHash'],
+        'receipt': player['decideWinner']['receipt']
+      }
     }, room=player['id'])
 
     emit('result',
@@ -547,24 +631,20 @@ def handle_choice(data):
       'playerId': opponent['id'],
       'opponentId': player['id'],
       'winnings': opponent['winnings'],
-      'totalWinnings': opponent['totalWinnings']
+      'totalWinnings': opponent['totalWinnings'],
+      'playerAddress': opponent['address'],
+      'contractAddress': opponent['contractAddress'],
+      'joinContract': {
+        'confirmationNumber': opponent['joinContract']['confirmationNumber'],
+        'transactionHash': opponent['joinContract']['transactionHash'],
+        'receipt': opponent['joinContract']['receipt']
+      },
+      'decideWinner': {
+        'confirmationNumber': opponent['decideWinner']['confirmationNumber'],
+        'transactionHash': opponent['decideWinner']['transactionHash'],
+        'receipt': opponent['decideWinner']['receipt']
+      }
     }, room=opponent['id'])
-
-    # Reset game session
-    game['round'] += 1
-    game['player1']['choice'] = None
-    game['player2']['choice'] = None
-    game['player1']['wager'] = None
-    game['player2']['wager'] = None
-    game['player1']['winnings'] = 0
-    game['player2']['winnings'] = 0
-    game['player1']['winner'] = None
-    game['player2']['winner'] = None
-    game['player1']['wagerAccepted'] = False
-    game['player2']['wagerAccepted'] = False
-    game['player1']['wagerOffered'] = False
-    game['player2']['wagerOffered'] = False
-
 
 if __name__ == '__main__':
   from geventwebsocket.handler import WebSocketHandler
