@@ -221,12 +221,15 @@ def handle_join_contract_confirmation_number_received(data):
 @socketio.on('join_contract_transaction_hash_received')
 def handle_join_contract_transaction(data):
   logger.info('join contract transaction hash: %s', data)
-  game = get_game_by_player_id(data['playerId'])
-  player = get_player_by_id(game, data['playerId'])
+  player_id = request.sid
+  game_session_id, game = get_game_by_player_id(player_id)
+  logger.info(f"Game: {game}")
+  _, player = get_player_by_id(game, player_id)
+  logger.info(f"Player: {player}")
   player['joinContract']['transactionHash'] = data['transactionHash']
-  player['address'] = data['address']
+  player['playerAddress'] = data['playerAddress']
   player['contractAddress'] = data['contractAddress']
-  logger.info('Current game state in on join_contract_transaction_hash_received: %s', games[data['sessionId']])
+  logger.info(f"Current game state in on join_contract_transaction_hash_received: {game}")
 
 @socketio.on('join_contract_transaction_receipt_received')
 def handle_join_contract_transaction(data):
