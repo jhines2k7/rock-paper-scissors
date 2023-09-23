@@ -62,7 +62,7 @@ with open('contracts/RPSContractFactory.json') as f:
   rps_contract_factory_abi = factory_json['abi']
 with open('contracts/RPSContract.json') as f:
   rps_json = json.load(f)
-  contract_abi = rps_json['abi']
+  rps_contract_abi = rps_json['abi']
 
 
 app = Flask(__name__)
@@ -213,6 +213,12 @@ def delete_game_session(game_session_id):
     logger.info("Game session with ID {} has been deleted.".format(game_session_id))
   else:
     logger.warning("Unable to find game session with ID {}.".format(game_session_id))
+
+@socketio.on('opponent_rejected_the_transaction')
+def handle_join_contract_transaction_failed(data):
+  logger.info('One party decided to reject the contract: %s', data)
+  # emit an event to both players to inform them that the join contract transaction failed
+  emit('opponent_rejected_the_transaction', data, room=data['opponentId'])
 
 @socketio.on('join_contract_confirmation_number_received')
 def handle_join_contract_confirmation_number_received(data):
@@ -378,6 +384,8 @@ def handle_accept_wager():
 
   if player['wagerAccepted'] and opponent['wagerAccepted']:
     logger.info('Both players accepted wagers. Generating contract.')
+    emit('generating_contract', {}, room=player['id'])
+    emit('generating_contract', {}, room=opponent['id'])
 
     tx_hash = None
     arbiter_fee_percentage = int(6.5 * 10**2) # 6.5%
@@ -428,10 +436,10 @@ def handle_accept_wager():
     
     # Call getContracts function
     contract_addresses = factory_contract.functions.getContracts().call()
-    logging.info(f"Contract addresses: {contract_addresses}")
+    logger.info(f"Contract addresses: {contract_addresses}")
     # Call the getLatestContract function
     created_contract_address = factory_contract.functions.getLatestContract().call()    
-    logging.info(f"Created contract address: {created_contract_address}")
+    logger.info(f"Created contract address: {created_contract_address}")
 
     emit('wager_accepted', {
       'playerId': player['id'],
@@ -531,7 +539,7 @@ def handle_choice(data):
     winner = determine_winner(game['player1']['choice'], game['player2']['choice'])
     set_winner(game, winner)
 
-    logging.info('Winner: {}'.format(winner))
+    logger.info('Winner: {}'.format(winner))
 
     if winner == 'draw':
       result = 'Draw!'
@@ -539,27 +547,28 @@ def handle_choice(data):
       player['winnings'] = winnings
       opponent['winnings'] = winnings
     else:
-      winner_key, winner_player = get_player_by_id(game, player_id) if winner == player_key else get_opponent_by_id(game, player_id)
-      loser_key, loser_player = get_opponent_by_id(game, player_id) if winner == player_key else get_player_by_id(game, player_id)
+      winner_key, winning_player = get_player_by_id(game, player_id) if winner == player_key else get_opponent_by_id(game, player_id)
+      loser_key, losing_player = get_opponent_by_id(game, player_id) if winner == player_key else get_player_by_id(game, player_id)
 
-      winnings = int(loser_player['wager'])
-      winner_player['winnings'] = winnings
-      loser_player['winnings'] = -1 * winnings
-      winner_player['totalWinnings'] += winnings
-      loser_player['totalWinnings'] -= winnings
+      winnings = int(losing_player['wager'])
+      winning_player['winnings'] = winnings
+      losing_player['winnings'] = -1 * winnings
+      winning_player['totalWinnings'] += winnings
+      losing_player['totalWinnings'] -= winnings
 
       result = 'You win!' if winner_key == player_key else 'You lose!'
 
     # call decideWinner contract function here
     logger.info('Calling decideWinner contract function')
     arbiter_account = Account.from_key(ARBITER_PRIVATE_KEY)
-    logging.info(f"Arbiter account address: {arbiter_account.address}")
-    winner_address = winner['playerAddress']
-    logging.info(f"Winner account address: {winner_address}")
-    rps_contract_address = web3.to_checksum_address(winner['contractAddress'])
-    logging.info(f"Contract address: {rps_contract_address}")
+    logger.info(f"Arbiter account address: {arbiter_account.address}")
+    logger.info(f"Winning player: {winning_player}")
+    winner_address = winning_player['playerAddress']
+    logger.info(f"Winner account address: {winner_address}")
+    rps_contract_address = web3.to_checksum_address(winning_player['contractAddress'])
+    logger.info(f"Contract address: {rps_contract_address}")
     
-    # Now interact with your factory contract
+    # Now interact with the rps contract
     rps_contract = web3.eth.contract(address=rps_contract_address, abi=rps_contract_abi)
 
     tx_hash = None
@@ -578,8 +587,6 @@ def handle_choice(data):
     else:
       # running on the Goerli testnet
       logger.info("Running on Goerli testnet")
-      # Let web3.py use PoA setting of the Goerli Testnet.
-      web3.middleware_onion.inject(geth_poa_middleware, layer=0)
 
     rps_txn = rps_contract.functions.decideWinner(web3.to_checksum_address(winner_address)).build_transaction({
       'from': arbiter_checksum_address,
@@ -593,11 +600,9 @@ def handle_choice(data):
     
     tx_receipt = None
 
-    # Get the transaction receipt for the join contract transaction
+    # Get the transaction receipt for the decide winner transaction
     tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
     print(f'Transaction receipt after decideWinner was called: {tx_receipt}')
-
-    logger.info('Current game state after {} round: {}'.format(game['round'], game))
 
     emit('result',
     {
