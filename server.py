@@ -5,7 +5,6 @@ import ssl
 import time
 import threading
 import json
-
 from gevent import monkey
 monkey.patch_all()
 
@@ -70,155 +69,70 @@ app.config['SECRET_KEY'] = 'your-secret-key'
 CORS(app)
 socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins='*')
 games = {}
-disconnected_players = {}
+player_queue = []
+players = {}
 
-def clean_disconnected_players():
-  while True:
-    time.sleep(30)  # check every 30 seconds
-    current_time = time.time()
-
-    for player_id, player_info in list(disconnected_players.items()):
-      if current_time - player_info['timestamp'] > 30:
-        del disconnected_players[player_id]
-        logger.info('Removed disconnected player information for player ID: {}'.format(player_id))
-
-def determine_winner(player1_choice, player2_choice):
+def determine_winner(player1, player2):
+  player1_choice = player1['choice']
+  player2_choice = player2['choice']
   if player1_choice == player2_choice:
-    return 'draw'
+    return None, None
   elif (player1_choice == 'rock' and player2_choice == 'scissors') or \
     (player1_choice == 'paper' and player2_choice == 'rock') or \
     (player1_choice == 'scissors' and player2_choice == 'paper'):
-    return 'player1'
+    return player1, player2
   else:
-    return 'player2'
+    return player2, player1
 
-def new_game_session():
-  session_id = uuid.uuid4()
-  games[session_id] = {
-    'gameId': str(session_id),
-    'player1': {
-      'id': None,
-      'choice': None,
-      'wager': None,
-      'winnings': None,
-      'totalWinnings': 0,
-      'wagerAccepted': False,
-      'wagerOffered': False,
-      'winner': None,
-      'playerAddress': None,
-      'contractAddress': None,
-      'joinContract': {
-        'confirmationNumber': None,
-        'transactionHash': None,
-        'receipt': None
-      },
-      'decideWinner': {
-        'confirmationNumber': None,
-        'transactionHash': None,
-        'receipt': None
-      }
-    },
-    'player2': {
-      'id': None,
-      'choice': None,
-      'wager': None,
-      'winnings': None,
-      'totalWinnings': 0,
-      'wagerAccepted': False,
-      'wagerOffered': False,
-      'winner': None,
-      'playerAddress': None,
-      'contractAddress': None,
-      'joinContract': {
-        'confirmationNumber': None,
-        'transactionHash': None,
-        'receipt': None
-      },
-      'decideWinner': {
-        'confirmationNumber': None,
-        'transactionHash': None,
-        'receipt': None
-      }
-    }
+def get_new_game():
+  game_id = uuid.uuid4()
+  
+  new_game = {
+    'id': game_id,
+    'player1_id': None,
+    'player2_id': None,
+    'winner_id': None,
+    'loser_id': None,
+    'contract_address': None,
+    'transactions': []
   }
+  """
+  transaction object
+  {
+    'confirmationNumber': None,
+    'transactionHash': None,
+    'receipt': None
+  }
+  """
+  return new_game
 
-  logger.info('Current game state in new_game_session: %s', games[session_id])
-
-  return session_id
-
-def get_open_game():
-  for session_id, game in games.items():
-    if game['player1']['id'] is not None and game['player2']['id'] is None:
-      return session_id
-
-  return None
-
-def get_empty_player():
+def get_new_player():
   return {
     'id': None,
     'choice': None,
     'wager': None,
-    'winnings': None,
-    'totalWinnings': 0,
-    'wagerAccepted': False,
-    'wagerOffered': False,
-    'winner': None,
-    'playerAddress': None,
-    'contractAddress': None,
-    'joinContract': {
-      'confirmationNumber': None,
-      'transactionHash': None,
-      'receipt': None
-    },
-    'decideWinner': {
-      'confirmationNumber': None,
-      'transactionHash': None,
-      'receipt': None
-    }
+    'winnings': 0,
+    'losses': 0,
+    'wager_accepted': False,
+    'wager_offered': False,
+    'player_address': None
   }
 
-def get_player_by_id(game, player_id):
-  if game['player1']['id'] == player_id:
-    return 'player1', game['player1']
-  if game['player2']['id'] == player_id:
-    return 'player2', game['player2']
-  return None, None
+@socketio.on('transaction_rejected')
+def handle_transaction_rejected(data):
+  the_rejector = players[data['player_address']]
+  logger.info('%s decided to reject the contract.', the_rejector['id'])
+  # notify the other player that the contract was rejected
+  game = games[data['game_id']]
+  player1_id = game['player1_id']
+  player2_id = game['player2_id']
 
-def get_opponent_by_id(game, player_id):
-  if game['player1']['id'] == player_id:
-    return 'player2', game['player2']
-  if game['player2']['id'] == player_id:
-    return 'player1', game['player1']
-  return None, None
+  # will need to call the contract here to refund the wager to the player that did not reject the contract
 
-def set_winner(game, winner):
-  if winner == 'player1':
-    game['player1']['winner'] = True
-    game['player2']['winner'] = False
-    return
-  if winner == 'player2':
-    game['player1']['winner'] = False
-    game['player2']['winner'] = True
-    return
-  if winner == 'draw':
-    game['player1']['winner'] = None
-    game['player2']['winner'] = None
-    return
-  return
-
-def delete_game_session(game_session_id):
-  """Delete the game session with the given game_session_id."""
-  if game_session_id in games:
-    del games[game_session_id]
-    logger.info("Game session with ID {} has been deleted.".format(game_session_id))
+  if player1_id == the_rejector['id']:
+    emit('transaction_rejected', data, room=player2_id)
   else:
-    logger.warning("Unable to find game session with ID {}.".format(game_session_id))
-
-@socketio.on('opponent_rejected_the_transaction')
-def handle_join_contract_transaction_failed(data):
-  logger.info('One party decided to reject the contract: %s', data)
-  # emit an event to both players to inform them that the join contract transaction failed
-  emit('opponent_rejected_the_transaction', data, room=data['opponentId'])
+    emit('transaction_rejected', data, room=player1_id)
 
 @socketio.on('join_contract_confirmation_number_received')
 def handle_join_contract_confirmation_number_received(data):
@@ -227,14 +141,11 @@ def handle_join_contract_confirmation_number_received(data):
 @socketio.on('join_contract_transaction_hash_received')
 def handle_join_contract_transaction(data):
   logger.info('join contract transaction hash: %s', data)
-  player_id = request.sid
-  game_session_id, game = get_game_by_player_id(player_id)
+  game = games[data['game_id']]
   logger.info(f"Game: {game}")
-  _, player = get_player_by_id(game, player_id)
+  player = players[data['player_address']]
   logger.info(f"Player: {player}")
-  player['joinContract']['transactionHash'] = data['transactionHash']
-  player['playerAddress'] = data['playerAddress']
-  player['contractAddress'] = data['contractAddress']
+  game['transactions'].append(data['transaction_hash'])
   logger.info(f"Current game state in on join_contract_transaction_hash_received: {game}")
 
 @socketio.on('join_contract_transaction_receipt_received')
@@ -243,149 +154,76 @@ def handle_join_contract_transaction(data):
 
 @socketio.on('connect')
 def handle_connect():
-  player_id = request.sid
+  params = request.args
+  address = params.get('address')
+  
+  # remove each player in the queue that has an id equal to address
+  player_queue[:] = [player for player in player_queue if player.get('id') != address]
 
-  open_game_session = get_open_game()
-  logger.info('Open game session: {}'.format(open_game_session))
+  # create a new player
+  player = get_new_player()
+  player['id'] = address
+  # add the player to the queue
+  player_queue.append(player)
+  #add the player to the players dictionary
+  players['player_id'] = player
 
-  if open_game_session is None:
-    logger.info('No open games. Creating new game session.')
-    game_session_id = new_game_session()
-    games[game_session_id]['player1']['id'] = player_id
-  else:
-    game_session_id = open_game_session
-    open_game = games[open_game_session]
-
-    logger.info('Joining open game: {}'.format(open_game))
-
-    if not open_game['player1']['id']:
-      open_game['player1']['id'] = player_id
-    elif not open_game['player2']['id']:
-      open_game['player2']['id'] = player_id
-
-  join_room(str(game_session_id))
-
-  opponent_key, opponent = get_opponent_by_id(games[game_session_id], player_id)
-  opponent_id = None if opponent is None else opponent['id']
-
-  emit('connected', {
-      'sessionId': str(game_session_id),
-      'playerId': player_id,
-      'opponentId': opponent_id
-  }, room=player_id)
-
-  if opponent_id is not None:
-      emit('opponent_connected', {
-          'opponentId': player_id
-      }, room=opponent_id)
-
-  logger.info('Player ID: {}, Opponent ID: {}'.format(player_id, opponent_id))
-  logger.info('Current game state in on connect handler: %s', games[game_session_id])
-
-@socketio.on('attempt_reconnect')
-def handle_attempt_reconnect():
-  player_id = request.sid
-  open_game_session = get_open_game()
-
-  if open_game_session is None:
-    logger.info('No open games. Creating new game session.')
-    game_session_id = new_game_session()
-    games[game_session_id]['player1']['id'] = player_id
-  else:
-    logger.info('Joining open game session.')
-    game_session_id = open_game_session
-    open_game = games[open_game_session]
-
-    if not open_game['player1']['id']:
-      open_game['player1']['id'] = player_id
-    elif not open_game['player2']['id']:
-      open_game['player2']['id'] = player_id
-
-  join_room(str(game_session_id))  # Add the player to the room corresponding to the game session
-  _, player = get_player_by_id(games[game_session_id], player_id)
-  opponent_key, opponent = get_opponent_by_id(games[game_session_id], player_id)
-
-  emit('connected', {
-      'sessionId': str(game_session_id),
-      'playerId': player['id'],
-      'opponentId': opponent['id'] if opponent else None
-    }, room=player_id)
-
-  if opponent:
-    emit('opponent_connected', {
-      'opponentId': player_id
-    }, room=opponent['id'])
-
-  logger.info('Current game state in on attempt_reconnect: %s', games[game_session_id])
-  logger.info(f'Player {player_id} reconnected.')
-
-@socketio.on('refresh')
-def handle_refresh():
-  player_id = request.sid
-
-  # Send an opponent_refresh event to the opponent if available.
-  game_session_id, game = get_game_by_player_id(player_id)
-  player_key, player = get_player_by_id(game, player_id)
-  opponent_key, opponent = get_opponent_by_id(game, player_id)
-
-  if opponent:
-    logger.info("Player {} refreshed. Informing opponent.".format(player_id))
-    emit('opponent_refresh', room=opponent["id"])
-  else:
-    # No opponent found, meaning there's only one player in the session.
-    logger.info("Player {} refreshed with no opponent. Deleting game/session.".format(player_id))
-    delete_game_session(game_session_id)
+def join_game():
+  # remove the first two players from the queue
+  player1 = player_queue.pop(0)
+  player2 = player_queue.pop(0)
+  # create a new game
+  game = get_new_game()
+  # set the player1_id and player2_id
+  game['player1_id'] = player1['id']
+  game['player2_id'] = player2['id']
+  # add the game to the games dictionary
+  games[game['id']] = game
+  # emit an event to both players to inform them that the game has started
+  emit('game_started', {'game_id': game['id']}, room=player1['id'])
+  emit('game_started', {'game_id': game['id']}, room=player2['id'])
 
 @socketio.on('offer_wager')
 def handle_submit_wager(data):
-  logger.info('Received wager from player %s: %s', request.sid, data)
-  player_id = request.sid
+  logger.info('Received wager from address %s', data.player_address)
   wager = data['wager']
 
-  game_session_id = None
-  for session_id, game in games.items():
-    if game['player1']['id'] == player_id or game['player2']['id'] == player_id:
-      game_session_id = session_id
-      break
-
-  game = games[game_session_id]
-  player_key, current_player = get_player_by_id(game, player_id)
-  _, opponent_player = get_opponent_by_id(game, player_id)
-
-  if current_player:
-    current_player['wager'] = wager
-    current_player['wagerOffered'] = True
-    opponent_id = opponent_player['id']
-
-  logger.info('Current game state in on offer_wager: %s', games[game_session_id])
-  emit('wager_offered', {'wager': wager, 'opponent_id': player_id}, room=opponent_id)
-
-def get_game_by_player_id(player_id):
-  for session_id, game in games.items():
-    player1_id = game['player1']['id']
-    player2_id = game['player2']['id']
-    if player1_id == player_id or player2_id == player_id:
-      return session_id, game
-  return None, None
+  # get the game session from the games dictionary
+  game = games[data['game_id']]
+  # get the playerId from the game session
+  playerId = game['player1_id'] if data.player_address == game['player1_id'] else game['player2_id']
+  # get the player from the players dictionary
+  player = players[playerId]
+  # assign the wager to the player
+  player['wager'] = wager
+  # if player1 offered the wager, emit an event to player2 to inform them that player1 offered a wager
+  if data.player_address == game['player1_id']:
+    emit('wager_offered', {'wager': wager}, room=game['player2_id'])
+  else:
+    emit('wager_offered', {'wager': wager}, room=game['player1_id'])
 
 @socketio.on('accept_wager')
-def handle_accept_wager():
-  player_id = request.sid
-  game_session_id, game = get_game_by_player_id(player_id)
+def handle_accept_wager(data):
+  # get the game session from the games dictionary
+  game = games[data['game_id']]
+  # get the playerId from the game session
+  playerId = game['player1_id'] if data['player_address'] == game['player1_id'] else game['player2_id']
+  # get the player from the players dictionary
+  player = players[playerId]
+  # mark the player as having accepted the wager
+  player['wager_accepted'] = True
 
-  if game is None:
-    logger.error("No game found for player_id {}".format(player_id))
-    return
+  # determine if both players have accepted the wager
+  player1_id = game['player1_id']
+  player2_id = game['player2_id']
+  player1 = players[player1_id]
+  player2 = players[player2_id]
 
-  _, player = get_player_by_id(game, player_id)
-  _, opponent = get_opponent_by_id(game, player_id)
-  player['wagerAccepted'] = True
-  logger.info('Current game state in on accept_wager: %s', games[game_session_id])
-
-  if player['wagerAccepted'] and opponent['wagerAccepted']:
-    logger.info('Both players accepted wagers. Generating contract.')
-    emit('generating_contract', {}, room=player['id'])
-    emit('generating_contract', {}, room=opponent['id'])
+  if player1['wager_accepted'] and player2['wager_accepted']:
+    logger.info('Both players have accepted a wager. Generating contract.')
+    # emit an event to both players to inform them that the contract is being generated
+    emit('generating_contract', {'playerId': player1_id}, room=player1_id)
+    emit('generating_contract', {'playerId': player2_id}, room=player2_id)
 
     tx_hash = None
     arbiter_fee_percentage = int(6.5 * 10**2) # 6.5%
@@ -432,6 +270,7 @@ def handle_accept_wager():
 
     # Get the transaction receipt for the contract creation transaction
     tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+    game['transactions'].append(tx_receipt)
     logger.info(f"Transaction receipt: {tx_receipt}")
     
     # Call getContracts function
@@ -441,44 +280,41 @@ def handle_accept_wager():
     created_contract_address = factory_contract.functions.getLatestContract().call()    
     logger.info(f"Created contract address: {created_contract_address}")
 
-    emit('wager_accepted', {
-      'playerId': player['id'],
-      'your_wager': player['wager'],
-      'opponent_wager': opponent['wager'],
-      'opponent_id': opponent['id'],
-      'contractAddress': created_contract_address
-    }, room=player['id'])
-
-    emit('wager_accepted', {
-      'playerId': opponent['id'],
-      'your_wager': opponent['wager'],
-      'opponent_wager': player['wager'],
-      'opponent_id': player['id'],
-      'contractAddress': created_contract_address
-    }, room=opponent['id'])
+    # notify both players that the contract has been created
+    emit('contract_created', {
+      'contract_address': created_contract_address, 
+      'your_wager': player1['wager'],
+      'opponent_wager': player2['wager'],
+    }, room=game['player1_id'])
+    emit('contract_created', {
+      'contract_address': created_contract_address,
+      'your_wager': player2['wager'],
+      'opponent_wager': player1['wager'],
+    }, room=game['player2_id'])
   else:
-    logger.info('One of the players did not accept wagers. Waiting for both players to accept wagers.')
-    emit('wager_accepted', {'opponent_id': player_id}, room=opponent['id'])
+    logger.info('Player %s accepted the wager. Waiting for opponent.', player['id'])
+    # if player1_id accepted the wager, emit an event to player2 to inform them that player1 accepted the wager and visa versa
+    if data['player_address'] == game['player1_id']:
+      emit('wager_accepted', {'playerId': game['player1_id']}, room=game['player2_id'])
+    else:
+      emit('wager_accepted', {'playerId': game['player2_id']}, room=game['player1_id'])
 
 @socketio.on('decline_wager')
-def handle_decline_wager():
-  player_id = request.sid
+def handle_decline_wager(data):
+  # get the game session from the games dictionary
+  game = games[data['game_id']]
+  # get the playerId from the game session
+  playerId = game['player1_id'] if data['player_address'] == game['player1_id'] else game['player2_id']
+  # get the player from the players dictionary
+  player = players[playerId]
+  # mark the player as having declined the wager
+  player['wager_accepted'] = False
 
-  game_session_id = None
-  for session_id, game in games.items():
-    player_role, _ = get_player_by_id(game, player_id)
-    if player_role is not None:
-      game_session_id = session_id
-      break
-
-  game = games[game_session_id]
-  _, opponent = get_opponent_by_id(game, player_id)
-
-  if opponent and opponent['id']:
-    logger.info('Current game state in on decline_wager: %s', games[game_session_id])
-    logger.info('Player declined wager. Notifying opponent.')
-
-    emit('wager_declined', {'playerId': player_id}, room=opponent['id'])  # Notify the opponent
+  # emit wager declined event to the opposing player
+  if data['player_address'] == game['player1_id']:
+    emit('wager_declined', {'gameId': game['id']}, room=game['player2_id'])
+  else:
+    emit('wager_declined', {'gameId': game['id']}, room=game['player1_id'])
 
 @socketio.on('disconnect')
 def handle_disconnect():
@@ -505,67 +341,52 @@ def handle_disconnect():
 
   logger.info('Player {} disconnected.'.format(player_id))
 
-@socketio.on('opponent_refresh')
-def handle_opponent_refresh():
-  player_id = request.sid
-  for game_session_id, game in games.items():
-    player_key, player = get_player_by_id(game, player_id)
-    if player is not None:
-      opponent_key, opponent = get_opponent_by_id(game, player_id)
-      if opponent is not None:
-        emit('opponent_disconnected', {'playerId': opponent['id']}, room=player_id)
-
-      break
-
 @socketio.on('choice')
 def handle_choice(data):
-  player_id = request.sid
-
-  game_session_id = None
-  for session_id, game in games.items():
-    if game['player1']['id'] == player_id or game['player2']['id'] == player_id:
-      game_session_id = session_id
-      break
-
-  game = games[game_session_id]
-  player_key, player = get_player_by_id(game, player_id)
-  opponent_key, opponent = get_opponent_by_id(game, player_id)
-
+  game = games[data['game_id']]
+  # assign the choice to the player
+  player = players[data['player_address']]
   player['choice'] = data['choice']
-  player['wager'] = data['wager']
-  logger.info('Player {} in session id {} chose: {}'.format(player_id, game_session_id, data['choice']))
+  logger.info('Player {} chose: {}'.format(data['player_address'], data['choice']))
 
-  if None not in [game['player1']['choice'], game['player2']['choice']]:
-    winner = determine_winner(game['player1']['choice'], game['player2']['choice'])
-    set_winner(game, winner)
+  # if both players have chosen, determine the winner
+  player1_id = game['player1_id']
+  player2_id = game['player2_id']
+  player1 = players[player1_id]
+  player2 = players[player2_id]
 
-    logger.info('Winner: {}'.format(winner))
+  if player1['choice'] and player2['choice']:
+    winner, loser = determine_winner(player1, player2)
+    
+    winner_address = None
 
-    if winner == 'draw':
-      result = 'Draw!'
-      winnings = 0
-      player['winnings'] = winnings
-      opponent['winnings'] = winnings
+    arbiter_account = Account.from_key(ARBITER_PRIVATE_KEY)
+    logger.info(f"Arbiter account address: {arbiter_account.address}")
+    
+    if winner is None and loser is None:
+      logger.info('Game is a draw.')
+      # set the game winner and loser
+      game['winner_id'] = None
+      game['loser_id'] = None
+
+      winner_address = arbiter_account.address    
     else:
-      winner_key, winning_player = get_player_by_id(game, player_id) if winner == player_key else get_opponent_by_id(game, player_id)
-      loser_key, losing_player = get_opponent_by_id(game, player_id) if winner == player_key else get_player_by_id(game, player_id)
+      game['winner_id'] = winner['id']
+      game['loser_id'] = loser['id']
+      logger.info('Winning player: {}'.format(winner))
+      logger.info('Losing player: {}'.format(loser))
+      # assign winnings to the winning player
+      winner['winnings'] = int(loser['wager'])
+      # assign losses to the losing player
+      loser['losses'] = int(loser['wager'])
 
-      winnings = int(losing_player['wager'])
-      winning_player['winnings'] = winnings
-      losing_player['winnings'] = -1 * winnings
-      winning_player['totalWinnings'] += winnings
-      losing_player['totalWinnings'] -= winnings
-
-      result = 'You win!' if winner_key == player_key else 'You lose!'
+      winner_address = winner['address']
 
     # call decideWinner contract function here
     logger.info('Calling decideWinner contract function')
-    arbiter_account = Account.from_key(ARBITER_PRIVATE_KEY)
-    logger.info(f"Arbiter account address: {arbiter_account.address}")
-    logger.info(f"Winning player: {winning_player}")
-    winner_address = winning_player['playerAddress']
+    
     logger.info(f"Winner account address: {winner_address}")
-    rps_contract_address = web3.to_checksum_address(winning_player['contractAddress'])
+    rps_contract_address = web3.to_checksum_address(game['contract_address'])
     logger.info(f"Contract address: {rps_contract_address}")
     
     # Now interact with the rps contract
@@ -603,64 +424,32 @@ def handle_choice(data):
     # Get the transaction receipt for the decide winner transaction
     tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
     print(f'Transaction receipt after decideWinner was called: {tx_receipt}')
+    game['transactions'].append(tx_receipt)
 
-    emit('result',
-    {
-      'result': result,
-      'your_wager': player['wager'],
-      'opponent_wager': opponent['wager'],
-      'yourChoice': player['choice'],
-      'opponentChoice': opponent['choice'],
-      'playerId': player['id'],
-      'opponentId': opponent['id'],
-      'winnings': player['winnings'],
-      'totalWinnings': player['totalWinnings'],
-      'playerAddress': player['address'],
-      'contractAddress': player['contractAddress'],
-      'joinContract': {
-        'confirmationNumber': player['joinContract']['confirmationNumber'],
-        'transactionHash': player['joinContract']['transactionHash'],
-        'receipt': player['joinContract']['receipt']
-      },
-      'decideWinner': {
-        'confirmationNumber': player['decideWinner']['confirmationNumber'],
-        'transactionHash': player['decideWinner']['transactionHash'],
-        'receipt': player['decideWinner']['receipt']
-      }
-    }, room=player['id'])
-
-    emit('result',
-    {
-      'result': 'You lose!' if result == 'You win!' else 'You win!',
-      'your_wager': opponent['wager'],
-      'opponent_wager': player['wager'],
-      'yourChoice': opponent['choice'],
-      'opponentChoice': player['choice'],
-      'playerId': opponent['id'],
-      'opponentId': player['id'],
-      'winnings': opponent['winnings'],
-      'totalWinnings': opponent['totalWinnings'],
-      'playerAddress': opponent['address'],
-      'contractAddress': opponent['contractAddress'],
-      'joinContract': {
-        'confirmationNumber': opponent['joinContract']['confirmationNumber'],
-        'transactionHash': opponent['joinContract']['transactionHash'],
-        'receipt': opponent['joinContract']['receipt']
-      },
-      'decideWinner': {
-        'confirmationNumber': opponent['decideWinner']['confirmationNumber'],
-        'transactionHash': opponent['decideWinner']['transactionHash'],
-        'receipt': opponent['decideWinner']['receipt']
-      }
-    }, room=opponent['id'])
+    if winner is None and loser is None:
+      # emit an event to both players to inform them that the game is a draw
+      emit('draw', {
+        'your_choice': player1['choice'],
+        'opp_choice': player2['choice']}, room=player1_id)
+      emit('draw', {
+        'result': 'Draw!', 
+        'your_choice': player2['choice'],
+        'opp_choice': player1['choice']}, room=player2_id)
+    else:
+      # emit an event to both players to inform them of the result
+      emit('you_win', {
+        'your_choice': winner['choice'],
+        'opp_choice': loser['choice'],
+        'winnings': winner['winnings']
+        }, room=winner['id'])
+      emit('you_lose', {
+        'your_choice': loser['choice'],
+        'opp_choice': winner['choice'], 
+        'losses': loser['losses']}, room=loser['id'])
 
 if __name__ == '__main__':
   from geventwebsocket.handler import WebSocketHandler
   from gevent.pywsgi import WSGIServer
-
-  cleanup_thread = threading.Thread(target=clean_disconnected_players)
-  cleanup_thread.daemon = True
-  cleanup_thread.start()
 
   logger.info('Starting server...')
 
@@ -673,3 +462,14 @@ if __name__ == '__main__':
   # http_server = WSGIServer(('0.0.0.0', 8000), app, handler_class=WebSocketHandler)
 
   http_server.serve_forever()
+
+  # run join_game every 3 seconds
+  while True:
+    time.sleep(3)
+    if len(player_queue) >= 2:
+      join_game()
+      logger.info('Game started. Player queue: {}'.format(player_queue))
+      logger.info('Games: {}'.format(games))
+    else:
+      logger.info('Waiting for players to join. Player queue: {}'.format(player_queue))
+      logger.info('Games: {}'.format(games))
