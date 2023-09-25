@@ -157,7 +157,16 @@ def handle_connect():
   player = get_new_player()
   player['player_address'] = player_address
   # add the player to the queue
+  logger.info('Adding player with address {} to queue'.format(player_address))
   player_queue.put(player)
+  
+  if player_queue.qsize() >= 2:
+    join_game()
+    logger.info('Game started. Number of players in queue: {}'.format(player_queue.qsize()))
+    logger.info('Games: {}'.format(games))
+  else:
+    logger.info('Waiting for players to join. Number of players in queue: {}'.format(player_queue.qsize()))
+    logger.info('Games: {}'.format(games))
 
 def join_game():
   # try to remove the first two players from the queue
@@ -200,17 +209,22 @@ def join_game():
     return    
   # create a new game
   game = get_new_game()
+  # set the game_id for each player
+  player1['game_id'] = game['id']
+  player2['game_id'] = game['id']
   # set the player1 and player2
   game['player1'] = player1
   game['player2'] = player2
   # add the game to the games dictionary
   games[game['id']] = game
-  # emit an event to both players to inform them that the game has started
-  logger.info('Game started. Player queue: {}'.format(player_queue))
-  logger.info('Games: {}'.format(games))
-  emit('game_started', {'game_id': game['id']}, room=game['player1']['player_address'])
-  emit('game_started', {'game_id': game['id']}, room=game['player2']['player_address'])
 
+  # emit an event to both players to inform them that the game has started
+  join_room(game['player1']['player_address'])
+  emit('game_started', {'game_id': str(game['id'])}, room=game['player1']['player_address'])
+
+  join_room(game['player2']['player_address'])
+  emit('game_started', {'game_id': str(game['id'])}, room=game['player2']['player_address'])
+  
 @socketio.on('offer_wager')
 def handle_submit_wager(data):
   player_address = data['player_address']
@@ -460,9 +474,12 @@ def handle_disconnect():
 @socketio.on('join_game')        
 def join_game_loop():
   if player_queue.qsize() >= 2:
+  if player_queue.qsize() >= 2:
     join_game()
+    logger.info('Game started. Number of players in queue: {}'.format(player_queue.qsize()))
+    logger.info('Games: {}'.format(games))
   else:
-    logger.info('Waiting for players to join. Player queue: {}'.format(player_queue))
+    logger.info('Waiting for players to join. Number of players in queue: {}'.format(player_queue.qsize()))
     logger.info('Games: {}'.format(games))
 
 if __name__ == '__main__':
