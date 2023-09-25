@@ -162,12 +162,12 @@ def handle_connect():
 def join_game():
   # try to remove the first two players from the queue
   try:
-    player1 = player_queue.get(block=False)
+    player1 = player_queue.get_nowait()
   except queue.Empty:
     logger.info('Player queue is empty.')
     return
   try:
-    player2 = player_queue.get(block=False)
+    player2 = player_queue.get_nowait()
   except queue.Empty:
     # put the first player back in the queue
     player_queue.put(player1)
@@ -175,8 +175,8 @@ def join_game():
     return
   # if both players have the same address, return
   try:
-    player1 = player_queue.get(block=False)
-    player2 = player_queue.get(block=False)
+    player1 = player_queue.get_nowait()
+    player2 = player_queue.get_nowait()
     if player1['player_address'] == player2['player_address']:
       return
   except queue.Empty:
@@ -186,8 +186,8 @@ def join_game():
     return    
   # if either player has already joined a game, return
   try:
-    player1 = player_queue.get(block=False)
-    player2 = player_queue.get(block=False)
+    player1 = player_queue.get_nowait()
+    player2 = player_queue.get_nowait()
     for game in games.values():
       if game['player1']['player_address'] == player1['player_address']:
         return
