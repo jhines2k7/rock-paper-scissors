@@ -185,11 +185,19 @@ def join_game():
     logger.info('Player queue has less than two players.')
     return    
   # if either player has already joined a game, return
-  for game in games.values():
-    if game['player1']['player_address'] == player1['player_address']:
-      return
-    if game['player2']['player_address'] == player2['player_address']:
-      return
+  try:
+    player1 = player_queue.get(block=False)
+    player2 = player_queue.get(block=False)
+    for game in games.values():
+      if game['player1']['player_address'] == player1['player_address']:
+        return
+      if game['player2']['player_address'] == player2['player_address']:
+        return
+  except queue.Empty:
+    # put the first player back in the queue
+    player_queue.put(player1)
+    logger.info('Player queue has less than two players.')
+    return    
   # create a new game
   game = get_new_game()
   # set the player1 and player2
