@@ -160,18 +160,36 @@ def handle_connect():
   player_queue.put(player)
 
 def join_game():
-  # remove the first two players from the queue
-  player1 = player_queue.get()
-  player2 = player_queue.get()
-  # if both players have the same address, return
-  if player1['player_address'] == player2['player_address']:
+  # try to remove the first two players from the queue
+  try:
+    player1 = player_queue.get(block=False)
+  except queue.Empty:
+    logger.info('Player queue is empty.')
     return
-  # if either player has already joined a game, get the next player from the queue
+  try:
+    player2 = player_queue.get(block=False)
+  except queue.Empty:
+    # put the first player back in the queue
+    player_queue.put(player1)
+    logger.info('Player queue has less than two players.')
+    return
+  # if both players have the same address, return
+  try:
+    player1 = player_queue.get(block=False)
+    player2 = player_queue.get(block=False)
+    if player1['player_address'] == player2['player_address']:
+      return
+  except queue.Empty:
+    # put the first player back in the queue
+    player_queue.put(player1)
+    logger.info('Player queue has less than two players.')
+    return    
+  # if either player has already joined a game, return
   for game in games.values():
-    if game['player1']['game_id'] != None:
-      player1 = player_queue.get()
-    if game['player2']['game_id'] != None:
-      player2 = player_queue.get()
+    if game['player1']['player_address'] == player1['player_address']:
+      return
+    if game['player2']['player_address'] == player2['player_address']:
+      return
   # create a new game
   game = get_new_game()
   # set the player1 and player2
@@ -180,6 +198,8 @@ def join_game():
   # add the game to the games dictionary
   games[game['id']] = game
   # emit an event to both players to inform them that the game has started
+  logger.info('Game started. Player queue: {}'.format(player_queue))
+  logger.info('Games: {}'.format(games))
   emit('game_started', {'game_id': game['id']}, room=game['player1']['player_address'])
   emit('game_started', {'game_id': game['id']}, room=game['player2']['player_address'])
 
@@ -431,10 +451,8 @@ def handle_disconnect():
  
 @socketio.on('join_game')        
 def join_game_loop():
-  if len(player_queue) >= 2:
+  if player_queue.qsize() >= 2:
     join_game()
-    logger.info('Game started. Player queue: {}'.format(player_queue))
-    logger.info('Games: {}'.format(games))
   else:
     logger.info('Waiting for players to join. Player queue: {}'.format(player_queue))
     logger.info('Games: {}'.format(games))
