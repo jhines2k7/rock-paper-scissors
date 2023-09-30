@@ -90,7 +90,8 @@ def get_new_game():
     'winner': None,
     'loser': None,
     'contract_address': None,
-    'transactions': []
+    'transactions': [],
+    'join_contract_transaction_rejected': False
   }
   """
   transaction object
@@ -114,19 +115,76 @@ def get_new_player():
     'wager_offered': False
   }
 
-@socketio.on('transaction_rejected')
+@socketio.on('join_contract_transaction_rejected')
 def handle_transaction_rejected(data):
   game = games[data['game_id']]
+
+  if game['join_contract_transaction_rejected']:
+    return
+  
+  game['join_contract_transaction_rejected'] = True
+  payee = None
+  payee_address = None
   # determine which player rejected the contract
   # notify the other player that the contract was rejected
   if game['player1']['address'] == data['address']:
-    emit('transaction_rejected', data, room=game['player2']['address'])
+    payee = game['player2']
+    payee_address = game['player2']['address']
   else:
-    emit('transaction_rejected', data, room=game['player1']['address'])
+    payee = game['player1']['address']
+    payee_address = game['player1']['address']
 
   # will need to call the contract to refund the player that did not reject the contract
 
   logger.info('%s decided to reject the contract.', data['address'])
+  arbiter_account = Account.from_key(ARBITER_PRIVATE_KEY)
+  logger.info(f"Arbiter account address: {arbiter_account.address}")
+
+  # call refundWager contract function here
+  logger.info('Calling refundWager contract function')
+  
+  logger.info(f"Payee account address: {payee['address']}")
+  rps_contract_address = web3.to_checksum_address(game['contract_address'])
+  logger.info(f"Contract address: {rps_contract_address}")
+  
+  # Now interact with the rps contract
+  rps_contract = web3.eth.contract(address=rps_contract_address, abi=rps_contract_abi)
+
+  tx_hash = None
+  rps_txn = None
+
+  # Set Gas Price
+  gas_price = web3.eth.gas_price  # Fetch the current gas price
+  arbiter_checksum_address = web3.to_checksum_address(arbiter_account.address)
+
+  # Sign transaction using the private key of the arbiter account
+  nonce = web3.eth.get_transaction_count(arbiter_checksum_address)  # Get the nonce
+
+  if 'local' in args.env:
+    # running locally using ganache
+    logger.info("Running locally using ganache")
+  else:
+    # running on the Goerli testnet
+    logger.info("Running on Goerli testnet")
+
+  rps_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee_address)).build_transaction({
+    'from': arbiter_checksum_address,
+    'nonce': nonce,
+    'gas': 800000,  # You may need to change the gas limit
+    'gasPrice': math.ceil(gas_price * 1.05)
+  })
+
+  signed = arbiter_account.sign_transaction(rps_txn)
+  tx_hash = web3.eth.send_raw_transaction(signed.rawTransaction)
+  
+  tx_receipt = None
+
+  # Get the transaction receipt for the decide winner transaction
+  tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+  print(f'Transaction receipt after refundWager was called: {tx_receipt}')
+  game['transactions'].append(tx_receipt)
+
+  emit('join_contract_transaction_rejected', data, room=payee['address'])
 
 @socketio.on('join_contract_confirmation_number_received')
 def handle_join_contract_confirmation_number_received(data):
