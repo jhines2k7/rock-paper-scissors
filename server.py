@@ -160,9 +160,9 @@ def handle_transaction_rejected(data):
   # Sign transaction using the private key of the arbiter account
   nonce = web3.eth.get_transaction_count(arbiter_checksum_address)  # Get the nonce
 
-  if 'local' in args.env:
-    # running locally using ganache
-    logger.info("Running locally using ganache")
+  if 'ganache' in args.env:
+    # running on a ganache test network
+    logger.info("Running on a ganache test network")
   else:
     # running on the Goerli testnet
     logger.info("Running on Goerli testnet")
@@ -321,9 +321,9 @@ def handle_accept_wager(data):
     # Now interact with your factory contract
     factory_contract = web3.eth.contract(address=factory_contract_address, abi=rps_contract_factory_abi)
 
-    if 'local' in args.env:
-      # running locally using ganache
-      logger.info("Running locally using ganache")
+    if 'ganache' in args.env:
+      # running on a ganache test network
+      logger.info("Running on a ganache test network")
       tx_hash = factory_contract.functions.createContract(arbiter_fee_percentage).transact({
         'from': web3.to_checksum_address(contract_owner_account.address)
       })
@@ -457,9 +457,9 @@ def handle_choice(data):
     # Sign transaction using the private key of the arbiter account
     nonce = web3.eth.get_transaction_count(arbiter_checksum_address)  # Get the nonce
 
-    if 'local' in args.env:
-      # running locally using ganache
-      logger.info("Running locally using ganache")
+    if 'ganache' in args.env:
+      # running on a ganache test network
+      logger.info("Running on a ganache test network")
     else:
       # running on the Goerli testnet
       logger.info("Running on Goerli testnet")
