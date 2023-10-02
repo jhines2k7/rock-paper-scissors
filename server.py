@@ -488,7 +488,7 @@ def handle_choice(data):
         'opp_choice': game['player2']['choice']}, room=game['player1']['address'])
       emit('draw', {
         'your_choice': game['player2']['choice'],
-        'opp_choice': game['player1']['choice']}, room=game['player2']['choice'])
+        'opp_choice': game['player1']['choice']}, room=game['player2']['address'])
     else:
       # emit an event to both players to inform them of the result
       emit('you_win', {

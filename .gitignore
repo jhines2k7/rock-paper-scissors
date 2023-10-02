@@ -1,5 +1,6 @@
 .env.test
 .env.prod
 .env.local
+.env.ganache
 contracts
 .vscode
