@@ -1,3 +1,4 @@
+import datetime
 import io
 import sys
 import logging
@@ -51,18 +52,11 @@ web3 = Web3(Web3.HTTPProvider(HTTP_PROVIDER))
 
 if 'test' in args.env:
   logger.info("Running on testnet")
-  # # for Goerli, make sure to inject the poa middleware
+  # for Goerli, make sure to inject the poa middleware
   web3.middleware_onion.inject(geth_poa_middleware, layer=0)
 
-# Load and parse the contract ABIs.
 rps_contract_factory_abi = None
 rps_contract_abi = None
-with open('contracts/RPSContractFactory.json') as f:
-  factory_json = json.load(f)
-  rps_contract_factory_abi = factory_json['abi']
-with open('contracts/RPSContract.json') as f:
-  rps_json = json.load(f)
-  rps_contract_abi = rps_json['abi']
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key'
@@ -118,12 +112,13 @@ def download_contract_abi():
     # Print the folder's ID if found
     if len(folders) > 0:
       logger.info(f"Folder ID: {folders[0]['id']}")
+      logger.info(f"Folder name: {folders[0]['name']}")
       folder_id = folders[0]['id']
     else:
       logger.info("Folder not found.")
 
     # Delete all files in the local contracts folder
-      download_dir = 'contracts'
+    download_dir = 'contracts'
     logger.info('Deleting all files in the contracts folder...')
     for file in os.listdir(download_dir):
       file_path = os.path.join(download_dir, file)
@@ -133,28 +128,40 @@ def download_contract_abi():
       except Exception as e:
         logger.error(f"An error occurred while deleting file: {file_path}")
         logger.error(e)
-
     # Getting all files in the contracts folder
-    results = service.files().list(q=f"'{folder_id}' in parents and trashed=false", pageSize=1000, fields="nextPageToken, files(id, name)").execute()
+    results = service.files().list(q=f"'{folder_id}' in parents and trashed=false", pageSize=1000, fields="nextPageToken, files(id, name, createdTime)").execute()
     files = results.get('files', [])
-
-    # Download each file from the folder
-    logger.info('Downloading contract ABIs...')
-    for file in files:
-      file_id = file['id']
-      file_name = file['name']
-      file_path = os.path.join(download_dir, file_name)
-
-      request = service.files().get_media(fileId=file_id)
-      fh = io.FileIO(file_path, 'wb')
-      downloader = MediaIoBaseDownload(fh, request)
     
-      logger.info(f'Downloading file: {file_name}')
-      logger.info(f'File {file_name} downloaded successfully!')
+    logger.info('Downloading contract ABIs...')
+    # Download each file from the folder
+    for file in files:
+      request_file = service.files().get_media(fileId=file['id'])
+      # Get the file metadata
+      file_metadata = service.files().get(fileId=file['id']).execute()
+      file_name = file_metadata['name']
+      created_time = datetime.datetime.strptime(file['createdTime'], "%Y-%m-%dT%H:%M:%S.%fZ")
+      logger.info(f"File Name: {file_name}, Created Time: {created_time}")
+
+      # Download the file content
+      fh = open(os.path.join("contracts", file_name), 'wb')
+      downloader = MediaIoBaseDownload(fh, request_file)
+
       done = False
-    while done is False:
-      status, done = downloader.next_chunk()
-      logger.info(f"Download progress {int(status.progress() * 100)}%.")
+      while done is False:
+        status, done = downloader.next_chunk()
+        logger.info(f"Download progress {int(status.progress() * 100)}%.")
+
+      print('File downloaded successfully.')
+
+    logger.info('Contract ABIs downloaded successfully!')
+    
+    # Load and parse the contract ABIs.
+    with open('contracts/RPSContractFactory.json') as f:
+      factory_json = json.load(f)
+      rps_contract_factory_abi = factory_json['abi']
+    with open('contracts/RPSContract.json') as f:
+      rps_json = json.load(f)
+      rps_contract_abi = rps_json['abi']
   except HttpError as error:
     # TODO(developer) - Handle errors from drive API.
     logger.error(f'An error occurred: {error}')
