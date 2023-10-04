@@ -4,3 +4,5 @@
 .env.ganache
 contracts
 .vscode
+.venv
+service-account.json

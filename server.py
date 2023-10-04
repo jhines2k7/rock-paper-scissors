@@ -1,25 +1,29 @@
+import io
 import sys
 import logging
 import uuid
 import json
+import argparse
+import os
+import math
+import queue
+
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from google.oauth2 import service_account
+from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaIoBaseDownload
 from gevent import monkey
 monkey.patch_all()
 
 from flask import Flask, request
 from flask_socketio import SocketIO, join_room, emit, leave_room
 from flask_cors import CORS
-
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from eth_account import Account
-
-import argparse
 from dotenv import load_dotenv
-import os
-
-from decimal import Decimal
-import math
-import queue
 
 logging.basicConfig(
   stream=sys.stderr,
@@ -67,6 +71,93 @@ socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins='*')
 games = {}
 player_queue = queue.Queue()
 players = {}
+
+def get_service(api_name, api_version, scopes, key_file_location):
+  """Get a service that communicates to a Google API.
+
+  Args:
+    api_name: The name of the api to connect to.
+    api_version: The api version to connect to.
+    scopes: A list auth scopes to authorize for the application.
+    key_file_location: The path to a valid service account JSON key file.
+
+  Returns:
+    A service that is connected to the specified API.
+  """
+
+  credentials = service_account.Credentials.from_service_account_file(
+  key_file_location)
+
+  scoped_credentials = credentials.with_scopes(scopes)
+
+  # Build the service object.
+  service = build(api_name, api_version, credentials=scoped_credentials)
+
+  return service
+
+def download_contract_abi():
+  # Define the auth scopes to request.
+  scope = 'https://www.googleapis.com/auth/drive.file'
+  key_file_location = 'service-account.json'
+    
+  # Specify the name of the folder you want to retrieve
+  folder_name = 'rock-paper-scissors'
+  
+  try:
+    # Authenticate and construct service.
+    service = get_service(
+      api_name='drive',
+      api_version='v3',
+      scopes=[scope],
+      key_file_location=key_file_location)
+        
+    results = service.files().list(q=f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder'").execute()
+    folders = results.get('files', [])
+    folder_id = None
+
+    # Print the folder's ID if found
+    if len(folders) > 0:
+      logger.info(f"Folder ID: {folders[0]['id']}")
+      folder_id = folders[0]['id']
+    else:
+      logger.info("Folder not found.")
+
+    # Delete all files in the local contracts folder
+      download_dir = 'contracts'
+    logger.info('Deleting all files in the contracts folder...')
+    for file in os.listdir(download_dir):
+      file_path = os.path.join(download_dir, file)
+      try:
+        if os.path.isfile(file_path):
+          os.unlink(file_path)
+      except Exception as e:
+        logger.error(f"An error occurred while deleting file: {file_path}")
+        logger.error(e)
+
+    # Getting all files in the contracts folder
+    results = service.files().list(q=f"'{folder_id}' in parents and trashed=false", pageSize=1000, fields="nextPageToken, files(id, name)").execute()
+    files = results.get('files', [])
+
+    # Download each file from the folder
+    logger.info('Downloading contract ABIs...')
+    for file in files:
+      file_id = file['id']
+      file_name = file['name']
+      file_path = os.path.join(download_dir, file_name)
+
+      request = service.files().get_media(fileId=file_id)
+      fh = io.FileIO(file_path, 'wb')
+      downloader = MediaIoBaseDownload(fh, request)
+    
+      logger.info(f'Downloading file: {file_name}')
+      logger.info(f'File {file_name} downloaded successfully!')
+      done = False
+    while done is False:
+      status, done = downloader.next_chunk()
+      logger.info(f"Download progress {int(status.progress() * 100)}%.")
+  except HttpError as error:
+    # TODO(developer) - Handle errors from drive API.
+    logger.error(f'An error occurred: {error}')
 
 def determine_winner(player1, player2):
   player1_choice = player1['choice']
@@ -131,7 +222,7 @@ def handle_transaction_rejected(data):
     payee = game['player2']
     payee_address = game['player2']['address']
   else:
-    payee = game['player1']['address']
+    payee = game['player1']
     payee_address = game['player1']['address']
 
   # will need to call the contract to refund the player that did not reject the contract
@@ -392,11 +483,11 @@ def handle_decline_wager(data):
   if game['player1']['address'] == address:
     game['player1']['wager_accepted'] = False
     # emit wager declined event to the opposing player
-    emit('wager_declined', room=game['player2']['address'])
+    emit('wager_declined', {'game_id': data['game_id']}, room=game['player2']['address'])
   else:
     game['player2']['wager_accepted'] = False
     # emit wager declined event to the opposing player
-    emit('wager_declined', room=game['player1']['address'])
+    emit('wager_declined', {'game_id': data['game_id']}, room=game['player1']['address'])
 
 @socketio.on('choice')
 def handle_choice(data):
@@ -524,21 +615,12 @@ def handle_disconnect():
       del games[game['id']]
       break
  
-@socketio.on('join_game')        
-def join_game_loop():
-  if player_queue.qsize() >= 2:
-    join_game()
-    logger.info('Game started. Number of players in queue: {}'.format(player_queue.qsize()))
-    logger.info('Games: {}'.format(games))
-  else:
-    logger.info('Waiting for players to join. Number of players in queue: {}'.format(player_queue.qsize()))
-    logger.info('Games: {}'.format(games))
-
-#def cleanup_rooms():
-
 if __name__ == '__main__':
   from geventwebsocket.handler import WebSocketHandler
   from gevent.pywsgi import WSGIServer
+  
+  logger.info('Downloading contract ABIs...')
+  download_contract_abi()
 
   logger.info('Starting server...')
 
