@@ -1,5 +1,4 @@
 import datetime
-import io
 import sys
 import logging
 import uuid
@@ -18,7 +17,7 @@ from googleapiclient.http import MediaIoBaseDownload
 from gevent import monkey
 monkey.patch_all()
 
-from flask import Flask, request
+from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, join_room, emit, leave_room
 from flask_cors import CORS
 from web3 import Web3
@@ -55,9 +54,6 @@ if 'test' in args.env:
   # for Goerli, make sure to inject the poa middleware
   web3.middleware_onion.inject(geth_poa_middleware, layer=0)
 
-rps_contract_factory_abi = None
-rps_contract_abi = None
-
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key'
 CORS(app)
@@ -65,6 +61,9 @@ socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins='*')
 games = {}
 player_queue = queue.Queue()
 players = {}
+
+rps_contract_factory_abi = None
+rps_contract_abi = None
 
 def get_service(api_name, api_version, scopes, key_file_location):
   """Get a service that communicates to a Google API.
@@ -154,14 +153,17 @@ def download_contract_abi():
       print('File downloaded successfully.')
 
     logger.info('Contract ABIs downloaded successfully!')
-    
+
     # Load and parse the contract ABIs.
     with open('contracts/RPSContractFactory.json') as f:
+      global rps_contract_factory_abi
       factory_json = json.load(f)
       rps_contract_factory_abi = factory_json['abi']
     with open('contracts/RPSContract.json') as f:
+      global rps_contract_abi
       rps_json = json.load(f)
       rps_contract_abi = rps_json['abi']
+
   except HttpError as error:
     # TODO(developer) - Handle errors from drive API.
     logger.error(f'An error occurred: {error}')
@@ -213,6 +215,11 @@ def get_new_player():
     'wager_offered': False
   }
 
+@app.route('/rps-contract-abi', methods=['GET'])
+def get_rps_contract_abi():
+  with open('contracts/RPSContract.json') as f:
+    return json.load(f)
+
 @socketio.on('join_contract_transaction_rejected')
 def handle_transaction_rejected(data):
   game = games[data['game_id']]
@@ -246,6 +253,7 @@ def handle_transaction_rejected(data):
   logger.info(f"Contract address: {rps_contract_address}")
   
   # Now interact with the rps contract
+  global rps_contract_abi
   rps_contract = web3.eth.contract(address=rps_contract_address, abi=rps_contract_abi)
 
   tx_hash = None
@@ -417,6 +425,7 @@ def handle_accept_wager(data):
     # Use your deployed factory contract address
     factory_contract_address = web3.to_checksum_address(RPS_CONTRACT_FACTORY_ADDRESS)
     # Now interact with your factory contract
+    global rps_contract_factory_abi
     factory_contract = web3.eth.contract(address=factory_contract_address, abi=rps_contract_factory_abi)
 
     if 'ganache' in args.env:
@@ -543,6 +552,7 @@ def handle_choice(data):
     logger.info(f"Contract address: {rps_contract_address}")
     
     # Now interact with the rps contract
+    global rps_contract_abi
     rps_contract = web3.eth.contract(address=rps_contract_address, abi=rps_contract_abi)
 
     tx_hash = None
