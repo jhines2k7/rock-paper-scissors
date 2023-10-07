@@ -43,8 +43,8 @@ load_dotenv(args.env)
 HTTP_PROVIDER = os.getenv("HTTP_PROVIDER")
 CONTRACT_OWNER_PRIVATE_KEY = os.getenv("CONTRACT_OWNER_PRIVATE_KEY")
 logger.info(f"Contract owner private key: {CONTRACT_OWNER_PRIVATE_KEY}")
-ARBITER_PRIVATE_KEY = os.getenv("ARBITER_PRIVATE_KEY")
-logger.info(f"Arbiter private key: {ARBITER_PRIVATE_KEY}")
+ARBITER_ADDRESS = os.getenv("ARBITER_ADDRESS")
+logger.info(f"Arbiter address: {ARBITER_ADDRESS}")
 RPS_CONTRACT_FACTORY_ADDRESS = os.getenv("RPS_CONTRACT_FACTORY_ADDRESS")
 # Connection
 web3 = Web3(Web3.HTTPProvider(HTTP_PROVIDER))
@@ -181,10 +181,8 @@ def determine_winner(player1, player2):
     return player2, player1
 
 def get_new_game():
-  game_id = uuid.uuid4()
-  
   new_game = {
-    'id': str(game_id),
+    'id': str(uuid.uuid4()),
     'player1': None,
     'player2': None,
     'winner': None,
@@ -428,10 +426,11 @@ def handle_accept_wager(data):
     global rps_contract_factory_abi
     factory_contract = web3.eth.contract(address=factory_contract_address, abi=rps_contract_factory_abi)
 
+    game_id = game['id']
     if 'ganache' in args.env:
       # running on a ganache test network
       logger.info("Running on a ganache test network")
-      tx_hash = factory_contract.functions.createContract(arbiter_fee_percentage).transact({
+      tx_hash = factory_contract.functions.createContract(arbiter_fee_percentage, game_id).transact({
         'from': web3.to_checksum_address(contract_owner_account.address)
       })
     else:
@@ -475,7 +474,42 @@ def handle_accept_wager(data):
       "from": web3.to_checksum_address(contract_owner_account.address)
     })  
     logger.info(f"Created contract address: {created_contract_address}")
-    game['contract_address'] = created_contract_address  
+    game['contract_address'] = created_contract_address
+
+    # set arbiter for the contract
+    rps_contract_address = web3.to_checksum_address(created_contract_address)
+    logger.info(f"Contract address: {rps_contract_address}")
+    
+    # Now interact with the rps contract
+    global rps_contract_abi
+    rps_contract = web3.eth.contract(address=rps_contract_address, abi=rps_contract_abi)
+
+    tx_hash = None
+    set_arbiter_txn = None
+
+    # Set Gas Price
+    gas_price = web3.eth.gas_price  # Fetch the current gas price
+    contract_owner_checksum_address = web3.to_checksum_address(contract_owner_account.address)
+
+    # Sign transaction using the private key of the contract owner account
+    nonce = web3.eth.get_transaction_count(contract_owner_checksum_address)  # Get the nonce
+
+    # call setArbiter
+    logger.info('Calling setArbiter contract function')
+    set_arbiter_txn = rps_contract.functions.setArbiter(web3.to_checksum_address(ARBITER_ADDRESS)).build_transaction({
+      'from': contract_owner_checksum_address,
+      'nonce': nonce,
+      'gas': 800000,  # You may need to change the gas limit
+      'gasPrice': math.ceil(gas_price * 1.05)
+    })
+
+    signed = contract_owner_account.sign_transaction(set_arbiter_txn)
+    tx_hash = web3.eth.send_raw_transaction(signed.rawTransaction)
+
+    # Get the transaction receipt for the contract creation transaction
+    tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+    game['transactions'].append(tx_receipt)
+    logger.info(f"Transaction receipt: {tx_receipt}")
 
     # notify both players that the contract has been created
     emit('contract_created', {
@@ -521,8 +555,8 @@ def handle_choice(data):
     winner, loser = determine_winner(game['player1'], game['player2'])
     winner_address = None
 
-    arbiter_account = Account.from_key(ARBITER_PRIVATE_KEY)
-    logger.info(f"Arbiter account address: {arbiter_account.address}")
+    contract_owner_account = Account.from_key(CONTRACT_OWNER_PRIVATE_KEY)
+    logger.info(f"Contract owner account address: {contract_owner_account.address}")
     
     if winner is None and loser is None:
       logger.info('Game is a draw.')
@@ -530,7 +564,7 @@ def handle_choice(data):
       game['winner'] = None
       game['loser'] = None
 
-      winner_address = arbiter_account.address    
+      winner_address = ARBITER_ADDRESS
     else:
       game['winner'] = winner
       game['loser'] = loser
@@ -557,13 +591,14 @@ def handle_choice(data):
 
     tx_hash = None
     rps_txn = None
+    tx_receipt = None
 
     # Set Gas Price
     gas_price = web3.eth.gas_price  # Fetch the current gas price
-    arbiter_checksum_address = web3.to_checksum_address(arbiter_account.address)
+    contract_owner_checksum_address = web3.to_checksum_address(contract_owner_account.address)
 
-    # Sign transaction using the private key of the arbiter account
-    nonce = web3.eth.get_transaction_count(arbiter_checksum_address)  # Get the nonce
+    # Sign transaction using the private key of the contract owner account
+    nonce = web3.eth.get_transaction_count(contract_owner_checksum_address)  # Get the nonce
 
     if 'ganache' in args.env:
       # running on a ganache test network
@@ -571,22 +606,20 @@ def handle_choice(data):
     else:
       # running on the Goerli testnet
       logger.info("Running on Goerli testnet")
-
+    
     rps_txn = rps_contract.functions.decideWinner(web3.to_checksum_address(winner_address)).build_transaction({
-      'from': arbiter_checksum_address,
+      'from': contract_owner_checksum_address,
       'nonce': nonce,
       'gas': 800000,  # You may need to change the gas limit
       'gasPrice': math.ceil(gas_price * 1.05)
     })
 
-    signed = arbiter_account.sign_transaction(rps_txn)
+    signed = contract_owner_account.sign_transaction(rps_txn)
     tx_hash = web3.eth.send_raw_transaction(signed.rawTransaction)
     
-    tx_receipt = None
-
     # Get the transaction receipt for the decide winner transaction
     tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
-    print(f'Transaction receipt after decideWinner was called: {tx_receipt}')
+    logger.info(f'Transaction receipt after decideWinner was called: {tx_receipt}')
     game['transactions'].append(tx_receipt)
 
     if winner is None and loser is None:
