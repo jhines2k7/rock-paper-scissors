@@ -189,7 +189,8 @@ def get_new_game():
     'loser': None,
     'contract_address': None,
     'transactions': [],
-    'join_contract_transaction_rejected': False
+    'join_contract_transaction_rejected': False,
+    'game_over': False
   }
   """
   transaction object
@@ -384,6 +385,12 @@ def handle_submit_wager(data):
 
   # get the game session from the games dictionary
   game = games[data['game_id']]
+  # exit early if the game is over
+  if game['game_over']:
+    logger.info('Game is over.')
+    # log the address of the player that tried to submit a wager
+    logger.info('Player %s tried to submit a wager.', address)
+    return
   # assign the wager to the correct player  
   # if player1 offered the wager, emit an event to player2 to inform them that player1 offered a wager
   if address == game['player1']['address']:
@@ -398,6 +405,12 @@ def handle_accept_wager(data):
   address = data['address']
   # get the game session from the games dictionary
   game = games[data['game_id']]
+  # exit early if the game is over
+  if game['game_over']:
+    logger.info('Game is over.')
+    # log the address of the player that tried to submit a wager
+    logger.info('Player %s tried to submit a wager.', address)
+    return
   # mark the player as having accepted the wager
   if address == game['player1']['address']:
     game['player1']['wager_accepted'] = True
@@ -529,6 +542,12 @@ def handle_decline_wager(data):
   address = data['address']
   # get the game session from the games dictionary
   game = games[data['game_id']]
+  # exit early if the game is over
+  if game['game_over']:
+    logger.info('Game is over.')
+    # log the address of the player that tried to submit a wager
+    logger.info('Player %s tried to submit a wager.', address)
+    return
   # mark the player as having declined the wager
   if game['player1']['address'] == address:
     game['player1']['wager_accepted'] = False
@@ -543,6 +562,12 @@ def handle_decline_wager(data):
 def handle_choice(data):
   address = data['address']
   game = games[data['game_id']]
+  # exit early if the game is over
+  if game['game_over']:
+    logger.info('Game is over.')
+    # log the address of the player that tried to submit a wager
+    logger.info('Player %s tried to submit a wager.', address)
+    return
   # assign the choice to the player
   if game['player1']['address'] == address:
     game['player1']['choice'] = data['choice']
@@ -642,6 +667,9 @@ def handle_choice(data):
         'opp_choice': game['winner']['choice'], 
         'losses': game['loser']['losses']
         }, room=game['loser']['address'])
+      
+  # GAME OVER, man!
+  game['game_over'] = True
 
 @socketio.on('disconnect')
 def handle_disconnect():
