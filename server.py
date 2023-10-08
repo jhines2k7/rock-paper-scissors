@@ -241,8 +241,8 @@ def handle_transaction_rejected(data):
   # will need to call the contract to refund the player that did not reject the contract
 
   logger.info('%s decided to reject the contract.', data['address'])
-  arbiter_account = Account.from_key(ARBITER_PRIVATE_KEY)
-  logger.info(f"Arbiter account address: {arbiter_account.address}")
+  contract_owner_account = Account.from_key(CONTRACT_OWNER_PRIVATE_KEY)
+  logger.info(f"Contract owner account address: {contract_owner_account.address}")
 
   # call refundWager contract function here
   logger.info('Calling refundWager contract function')
@@ -260,7 +260,7 @@ def handle_transaction_rejected(data):
 
   # Set Gas Price
   gas_price = web3.eth.gas_price  # Fetch the current gas price
-  arbiter_checksum_address = web3.to_checksum_address(arbiter_account.address)
+  arbiter_checksum_address = web3.to_checksum_address(contract_owner_account.address)
 
   # Sign transaction using the private key of the arbiter account
   nonce = web3.eth.get_transaction_count(arbiter_checksum_address)  # Get the nonce
@@ -272,14 +272,14 @@ def handle_transaction_rejected(data):
     # running on the Goerli testnet
     logger.info("Running on Goerli testnet")
 
-  rps_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee_address)).build_transaction({
+  rps_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee_address), game['id']).build_transaction({
     'from': arbiter_checksum_address,
     'nonce': nonce,
     'gas': 800000,  # You may need to change the gas limit
     'gasPrice': math.ceil(gas_price * 1.05)
   })
 
-  signed = arbiter_account.sign_transaction(rps_txn)
+  signed = contract_owner_account.sign_transaction(rps_txn)
   tx_hash = web3.eth.send_raw_transaction(signed.rawTransaction)
   
   tx_receipt = None
@@ -509,7 +509,7 @@ def handle_accept_wager(data):
 
     # call setArbiter
     logger.info('Calling setArbiter contract function')
-    set_arbiter_txn = rps_contract.functions.setArbiter(web3.to_checksum_address(ARBITER_ADDRESS)).build_transaction({
+    set_arbiter_txn = rps_contract.functions.setArbiter(web3.to_checksum_address(ARBITER_ADDRESS), game['id']).build_transaction({
       'from': contract_owner_checksum_address,
       'nonce': nonce,
       'gas': 800000,  # You may need to change the gas limit
@@ -632,7 +632,7 @@ def handle_choice(data):
       # running on the Goerli testnet
       logger.info("Running on Goerli testnet")
     
-    rps_txn = rps_contract.functions.decideWinner(web3.to_checksum_address(winner_address)).build_transaction({
+    rps_txn = rps_contract.functions.decideWinner(web3.to_checksum_address(winner_address), game['id']).build_transaction({
       'from': contract_owner_checksum_address,
       'nonce': nonce,
       'gas': 800000,  # You may need to change the gas limit
@@ -646,6 +646,9 @@ def handle_choice(data):
     tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
     logger.info(f'Transaction receipt after decideWinner was called: {tx_receipt}')
     game['transactions'].append(tx_receipt)
+
+    # GAME OVER, man!
+    game['game_over'] = True
 
     if winner is None and loser is None:
       # emit an event to both players to inform them that the game is a draw
@@ -667,9 +670,7 @@ def handle_choice(data):
         'opp_choice': game['winner']['choice'], 
         'losses': game['loser']['losses']
         }, room=game['loser']['address'])
-      
-  # GAME OVER, man!
-  game['game_over'] = True
+        
 
 @socketio.on('disconnect')
 def handle_disconnect():
