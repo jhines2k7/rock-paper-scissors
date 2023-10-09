@@ -179,68 +179,9 @@ def determine_winner(player1, player2):
     return player1, player2
   else:
     return player2, player1
-
-def get_new_game():
-  new_game = {
-    'id': str(uuid.uuid4()),
-    'player1': None,
-    'player2': None,
-    'winner': None,
-    'loser': None,
-    'contract_address': None,
-    'transactions': [],
-    'join_contract_transaction_rejected': False,
-    'game_over': False
-  }
-  """
-  transaction object
-  {
-    'confirmationNumber': None,
-    'transactionHash': None,
-    'receipt': None
-  }
-  """
-  return new_game
-
-def get_new_player():
-  return {
-    'game_id': None,
-    'address': None,
-    'choice': None,
-    'wager': None,
-    'winnings': 0,
-    'losses': 0,
-    'wager_accepted': False,
-    'wager_offered': False
-  }
-
-@app.route('/rps-contract-abi', methods=['GET'])
-def get_rps_contract_abi():
-  with open('contracts/RPSContract.json') as f:
-    return json.load(f)
-
-@socketio.on('join_contract_transaction_rejected')
-def handle_transaction_rejected(data):
-  game = games[data['game_id']]
-
-  if game['join_contract_transaction_rejected']:
-    return
   
-  game['join_contract_transaction_rejected'] = True
-  payee = None
-  payee_address = None
-  # determine which player rejected the contract
-  # notify the other player that the contract was rejected
-  if game['player1']['address'] == data['address']:
-    payee = game['player2']
-    payee_address = game['player2']['address']
-  else:
-    payee = game['player1']
-    payee_address = game['player1']['address']
-
-  # will need to call the contract to refund the player that did not reject the contract
-
-  logger.info('%s decided to reject the contract.', data['address'])
+def refund_wager(game, payee):
+  # will need to refund the player that did not reject the contract
   contract_owner_account = Account.from_key(CONTRACT_OWNER_PRIVATE_KEY)
   logger.info(f"Contract owner account address: {contract_owner_account.address}")
 
@@ -272,7 +213,7 @@ def handle_transaction_rejected(data):
     # running on the Goerli testnet
     logger.info("Running on Goerli testnet")
 
-  rps_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee_address), game['id']).build_transaction({
+  rps_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee['address']), game['id']).build_transaction({
     'from': arbiter_checksum_address,
     'nonce': nonce,
     'gas': 800000,  # You may need to change the gas limit
@@ -289,7 +230,78 @@ def handle_transaction_rejected(data):
   print(f'Transaction receipt after refundWager was called: {tx_receipt}')
   game['transactions'].append(tx_receipt)
 
-  emit('join_contract_transaction_rejected', data, room=payee['address'])
+  return tx_hash
+
+def get_new_game():
+  new_game = {
+    'id': str(uuid.uuid4()),
+    'player1': None,
+    'player2': None,
+    'winner': None,
+    'loser': None,
+    'contract_address': None,
+    'transactions': [],
+    'game_over': False
+  }
+  """
+  transaction object
+  {
+    'confirmationNumber': None,
+    'transactionHash': None,
+    'receipt': None
+  }
+  """
+  return new_game
+
+def get_new_player():
+  return {
+    'game_id': None,
+    'address': None,
+    'choice': None,
+    'wager': None,
+    'winnings': 0,
+    'losses': 0,
+    'wager_accepted': False,
+    'wager_offered': False,
+    'contract_accepted': False
+  }
+
+@app.route('/rps-contract-abi', methods=['GET'])
+def get_rps_contract_abi():
+  with open('contracts/RPSContract.json') as f:
+    return json.load(f)
+
+@socketio.on('contract_rejected')
+def handle_transaction_rejected(data):
+  game = games[data['game_id']]
+
+  if game['game_over']:    
+    return
+  
+  logging.info(f"Player {data['address']} rejected the contract.")
+
+  payee = None  
+  # determine which player rejected the contract
+  if game['player1']['address'] == data['address']:
+    game['player1']['rejected_the_contract'] = True
+
+    # did the other player accept the contract?
+    if game['player2']['contract_accepted']:
+      payee=game['player2']
+      # refund the player that accepted the contract
+      tx_hash = refund_wager(game, payee=payee)
+      emit('player_stake_refunded', { 'transaction_hash': tx_hash }, room=game['player2']['address'])
+  else:
+    game['player2']['rejected_the_contract'] = True
+
+    # did the other player accept the contract?
+    if game['player1']['contract_accepted']:
+      payee=game['player1']
+      # refund the player that accepted the contract
+      tx_hash = refund_wager(game, payee=payee)
+      emit('player_stake_refunded', { 'transaction_hash': tx_hash }, room=game['player2']['address'])
+  
+  game['game_over'] = True
 
 @socketio.on('join_contract_confirmation_number_received')
 def handle_join_contract_confirmation_number_received(data):
@@ -297,11 +309,35 @@ def handle_join_contract_confirmation_number_received(data):
 
 @socketio.on('join_contract_transaction_hash_received')
 def handle_join_contract_transaction(data):
+  game = games[data['game_id']]
+
   logger.info('join contract transaction hash: %s', data)
   game = games[data['game_id']]
   logger.info(f"Game: {game}")
   game['transactions'].append(data['transaction_hash'])
   logger.info(f"Current game state in on join_contract_transaction_hash_received: {game}")
+  
+  # which player accepted the contract
+  if game['player1']['address'] == data['address']:
+    game['player1']['contract_accepted'] = True
+  else:
+    game['player2']['contract_accepted'] = True
+  
+  # if the game is over, one player has already rejected the contract
+  if game['game_over']:
+    logger.info('One player decided not to join the contract. Notifying the opposing player and issuing a refund.')
+
+    payee = None
+  
+    # refund the player that just accepted the contract
+    if game['player1']['address'] == data['address']:
+      payee = game['player1']
+    else:
+      payee = game['player2']
+
+    tx_hash = refund_wager(game, payee=payee)
+    
+    emit('player_stake_refunded', { 'transaction_hash': tx_hash }, room=payee['address'])
 
 @socketio.on('join_contract_transaction_receipt_received')
 def handle_join_contract_transaction(data):
