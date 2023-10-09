@@ -495,7 +495,8 @@ def handle_accept_wager(data):
 
       # Create contract using createContract function      
       construct_txn = factory_contract.functions.createContract(
-        arbiter_fee_percentage
+        arbiter_fee_percentage,
+        game_id
       ).build_transaction({
         'from': web3.to_checksum_address(contract_owner_account.address),
         'nonce': nonce,
