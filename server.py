@@ -241,6 +241,7 @@ def get_new_game():
     'loser': None,
     'contract_address': None,
     'transactions': [],
+    'insufficient_funds': False,
     'game_over': False
   }
   """
@@ -270,6 +271,25 @@ def get_new_player():
 def get_rps_contract_abi():
   with open('contracts/RPSContract.json') as f:
     return json.load(f)
+
+@socketio.on('heartbeat')
+def handle_heartbeat(data):
+  logger.info('Received heartbeat from client.')
+  logger.info(data)
+  # Emit a response back to the client
+  emit('heartbeat_response', 'pong')
+
+@socketio.on('insufficient_funds')  
+def handle_insufficient_funds(data):
+  logger.info('Player: %s had insufficient funds to join the contract.', data['address'])
+  
+  game = games[data['game_id']]
+
+  if game['game_over']:    
+    return
+    
+  game['insufficient_funds'] = True
+  game['game_over'] = True
 
 @socketio.on('contract_rejected')
 def handle_transaction_rejected(data):
@@ -311,21 +331,18 @@ def handle_join_contract_confirmation_number_received(data):
 def handle_join_contract_transaction(data):
   game = games[data['game_id']]
 
-  logger.info('join contract transaction hash: %s', data)
-  game = games[data['game_id']]
-  logger.info(f"Game: {game}")
-  game['transactions'].append(data['transaction_hash'])
-  logger.info(f"Current game state in on join_contract_transaction_hash_received: {game}")
-  
   # which player accepted the contract
   if game['player1']['address'] == data['address']:
     game['player1']['contract_accepted'] = True
   else:
     game['player2']['contract_accepted'] = True
+
+  logger.info('join contract transaction hash: %s', data)
+  game['transactions'].append(data['transaction_hash'])
+  logger.info(f"Current game state in on join_contract_transaction_hash_received: {game}")
   
-  # if the game is over, one player has already rejected the contract
+  # if the game is over, one player has already rejected the contract, or there were insufficient funds
   if game['game_over']:
-    logger.info('One player decided not to join the contract. Notifying the opposing player and issuing a refund.')
 
     payee = None
   
@@ -337,7 +354,12 @@ def handle_join_contract_transaction(data):
 
     tx_hash = refund_wager(game, payee=payee)
     
-    emit('player_stake_refunded', { 'transaction_hash': tx_hash }, room=payee['address'])
+    if game['insufficient_funds']:
+      logger.info('One player did not have the funds to join the contract. Notifying the opposing player and issuing a refund.')
+      emit('player_stake_refunded', { 'transaction_hash': tx_hash, 'reason': 'insufficient_funds' }, room=payee['address'])
+    else:
+      logger.info('One player decided not to join the contract. Notifying the opposing player and issuing a refund.')
+      emit('player_stake_refunded', { 'transaction_hash': tx_hash, 'reason': 'contract_rejected' }, room=payee['address'])
 
 @socketio.on('join_contract_transaction_receipt_received')
 def handle_join_contract_transaction(data):
