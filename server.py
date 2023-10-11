@@ -542,17 +542,22 @@ def handle_accept_wager(data):
       logger.info(f"Transaction receipt: {tx_receipt}")
     except ValueError as e:
       if 'insufficient funds for gas * price + value' in str(e):
+        logger.error(e)
         logger.error("The contract owner account does not have the funds to cover the cost of creating the RPSContract for this game.")        
       else:
         logger.error(f"A ValueError occurred: {str(e)}")
       # notify both players there was an error creating the contract
       emit('contract_creation_error', room=game['player1']['address'])
       emit('contract_creation_error', room=game['player2']['address'])
+
+      return
     except Exception as e:
       logger.error(f"An error occurred: {str(e)}")
       # notify both players there was an error creating the contract
       emit('contract_creation_error', room=game['player1']['address'])
       emit('contract_creation_error', room=game['player2']['address'])
+
+      return
     
     # Call getContracts function
     contract_addresses = factory_contract.functions.getContracts().call({
