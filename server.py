@@ -486,6 +486,8 @@ def handle_accept_wager(data):
     emit('generating_contract', room=game['player1']['address'])
     emit('generating_contract', room=game['player2']['address'])
 
+    logger.info(f"Current game state in on accept_wager after both players have accepted wagers: {game}")
+
     tx_hash = None
     arbiter_fee_percentage = int(6.5 * 10**2) # 6.5%
     contract_owner_account = Account.from_key(CONTRACT_OWNER_PRIVATE_KEY)
@@ -499,6 +501,7 @@ def handle_accept_wager(data):
     factory_contract = web3.eth.contract(address=factory_contract_address, abi=rps_contract_factory_abi)
 
     game_id = game['id']
+
     if 'ganache' in args.env:
       # running on a ganache test network
       logger.info("Running on a ganache test network")
@@ -527,15 +530,29 @@ def handle_accept_wager(data):
         'gasPrice': math.ceil(gas_price * 1.05)
       })
 
+    try:
       signed = contract_owner_account.sign_transaction(construct_txn)
-      tx_hash = web3.eth.send_raw_transaction(signed.rawTransaction)
-      
-    tx_receipt = None
 
-    # Get the transaction receipt for the contract creation transaction
-    tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
-    game['transactions'].append(tx_receipt)
-    logger.info(f"Transaction receipt: {tx_receipt}")
+      tx_hash = web3.eth.send_raw_transaction(signed.rawTransaction)
+      tx_receipt = None
+
+      # Get the transaction receipt for the contract creation transaction
+      tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+      game['transactions'].append(tx_receipt)
+      logger.info(f"Transaction receipt: {tx_receipt}")
+    except ValueError as e:
+      if 'insufficient funds for gas * price + value' in str(e):
+        logger.error("The contract owner account does not have the funds to cover the cost of creating the RPSContract for this game.")        
+      else:
+        logger.error(f"A ValueError occurred: {str(e)}")
+      # notify both players there was an error creating the contract
+      emit('contract_creation_error', room=game['player1']['address'])
+      emit('contract_creation_error', room=game['player2']['address'])
+    except Exception as e:
+      logger.error(f"An error occurred: {str(e)}")
+      # notify both players there was an error creating the contract
+      emit('contract_creation_error', room=game['player1']['address'])
+      emit('contract_creation_error', room=game['player2']['address'])
     
     # Call getContracts function
     contract_addresses = factory_contract.functions.getContracts().call({
@@ -699,14 +716,26 @@ def handle_choice(data):
       'gasPrice': math.ceil(gas_price * 1.05)
     })
 
-    signed = contract_owner_account.sign_transaction(rps_txn)
-    tx_hash = web3.eth.send_raw_transaction(signed.rawTransaction)
-    
-    # Get the transaction receipt for the decide winner transaction
-    tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
-    logger.info(f'Transaction receipt after decideWinner was called: {tx_receipt}')
-    game['transactions'].append(tx_receipt)
+    try:
+      signed = contract_owner_account.sign_transaction(rps_txn)
+      tx_hash = web3.eth.send_raw_transaction(signed.rawTransaction)
+      tx_receipt = None
 
+      # Get the transaction receipt for the decide winner transaction
+      tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+      logger.info(f'Transaction receipt after decideWinner was called: {tx_receipt}')
+      game['transactions'].append(tx_receipt)
+    except ValueError as e:
+      logger.error(f"A ValueError occurred: {str(e)}")
+      # notify both players there was an error deciding the winner
+      emit('decide_winner_error', room=game['player1']['address'])
+      emit('decide_winner_error', room=game['player2']['address'])
+    except Exception as e:
+      logger.error(f"An error occurred: {str(e)}")
+      # notify both players there was an deciding the winner
+      emit('decide_winner_error', room=game['player1']['address'])
+      emit('decide_winner_error', room=game['player2']['address'])
+    
     # GAME OVER, man!
     game['game_over'] = True
 
@@ -729,8 +758,7 @@ def handle_choice(data):
         'your_choice': game['loser']['choice'],
         'opp_choice': game['winner']['choice'], 
         'losses': game['loser']['losses']
-        }, room=game['loser']['address'])
-        
+        }, room=game['loser']['address'])        
 
 @socketio.on('disconnect')
 def handle_disconnect():
