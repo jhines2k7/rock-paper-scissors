@@ -210,8 +210,8 @@ def refund_wager(game, payee):
     # running on a ganache test network
     logger.info("Running on a ganache test network")
   else:
-    # running on the Goerli testnet
-    logger.info("Running on Goerli testnet")
+    # running on the Sepolia testnet
+    logger.info("Running on Sepolia testnet")
 
   rps_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee['address']), game['id']).build_transaction({
     'from': arbiter_checksum_address,
@@ -292,19 +292,17 @@ def handle_insufficient_funds(data):
   game['game_over'] = True
 
 @socketio.on('contract_rejected')
-def handle_transaction_rejected(data):
+def handle_contract_rejected(data):
   game = games[data['game_id']]
 
-  if game['game_over']:    
+  if game['game_over']:
     return
-  
+
   logging.info(f"Player {data['address']} rejected the contract.")
 
   payee = None  
   # determine which player rejected the contract
   if game['player1']['address'] == data['address']:
-    game['player1']['rejected_the_contract'] = True
-
     # did the other player accept the contract?
     if game['player2']['contract_accepted']:
       payee=game['player2']
@@ -312,8 +310,6 @@ def handle_transaction_rejected(data):
       tx_hash = refund_wager(game, payee=payee)
       emit('player_stake_refunded', { 'transaction_hash': tx_hash }, room=game['player2']['address'])
   else:
-    game['player2']['rejected_the_contract'] = True
-
     # did the other player accept the contract?
     if game['player1']['contract_accepted']:
       payee=game['player1']
@@ -322,14 +318,11 @@ def handle_transaction_rejected(data):
       emit('player_stake_refunded', { 'transaction_hash': tx_hash }, room=game['player2']['address'])
   
   game['game_over'] = True
-
-@socketio.on('join_contract_confirmation_number_received')
-def handle_join_contract_confirmation_number_received(data):
-  logger.info('join contract confirmation number: %s', data)
-
-@socketio.on('join_contract_transaction_hash_received')
-def handle_join_contract_transaction(data):
+  
+@socketio.on('join_contract_confirmation')
+def handle_join_contract_confirmation(data):
   game = games[data['game_id']]
+  logger.info('join contract confirmation number: %s', data)
 
   # which player accepted the contract
   if game['player1']['address'] == data['address']:
@@ -337,13 +330,10 @@ def handle_join_contract_transaction(data):
   else:
     game['player2']['contract_accepted'] = True
 
-  logger.info('join contract transaction hash: %s', data)
-  game['transactions'].append(data['transaction_hash'])
-  logger.info(f"Current game state in on join_contract_transaction_hash_received: {game}")
-  
+  logger.info(f"Current game state in on join_contract_: {game}")
+
   # if the game is over, one player has already rejected the contract, or there were insufficient funds
   if game['game_over']:
-
     payee = None
   
     # refund the player that just accepted the contract
@@ -361,9 +351,18 @@ def handle_join_contract_transaction(data):
       logger.info('One player decided not to join the contract. Notifying the opposing player and issuing a refund.')
       emit('player_stake_refunded', { 'transaction_hash': tx_hash, 'reason': 'contract_rejected' }, room=payee['address'])
 
-@socketio.on('join_contract_transaction_receipt_received')
-def handle_join_contract_transaction(data):
-  logger.info('join contract transaction receipt received: %s', data)  
+@socketio.on('join_contract_hash')
+def handle_join_contract_hash(data):
+  logger.info('join contract transaction hash received: %s', data)
+  game = games[data['game_id']]
+  game['transactions'].append(data['transaction_hash'])
+  logger.info(f"Current game state in on join_contract_hash: {game}")
+
+@socketio.on('join_contract_receipt')
+def handle_join_contract_receipt(data):
+  game = games[data['game_id']]
+  logger.info('join contract transaction receipt received: %s', data)
+  logger.info(f"Current game state in on join_contract_receipt: {game}")
 
 @socketio.on('connect')
 def handle_connect():
@@ -453,9 +452,11 @@ def handle_submit_wager(data):
   # if player1 offered the wager, emit an event to player2 to inform them that player1 offered a wager
   if address == game['player1']['address']:
     game['player1']['wager'] = wager
+    game['player1']['wager_offered'] = True
     emit('wager_offered', {'wager': wager}, room=game['player2']['address'])
   else:
     game['player2']['wager'] = wager
+    game['player2']['wager_offered'] = True
     emit('wager_offered', {'wager': wager}, room=game['player1']['address'])
 
 @socketio.on('accept_wager')
@@ -472,10 +473,10 @@ def handle_accept_wager(data):
   # mark the player as having accepted the wager
   if address == game['player1']['address']:
     game['player1']['wager_accepted'] = True
-    emit('wager_accepted', room=game['player2']['address'])
+    emit('wager_accepted', {'opp_wager_in_eth': data['opp_wager_in_eth']}, room=game['player2']['address'])
   else:
     game['player2']['wager_accepted'] = True
-    emit('wager_accepted', room=game['player1']['address'])
+    emit('wager_accepted', {'opp_wager_in_eth': data['opp_wager_in_eth']}, room=game['player1']['address'])
 
   logger.info('Player %s accepted the wager. Waiting for opponent.', address)
 
@@ -505,8 +506,8 @@ def handle_accept_wager(data):
         'from': web3.to_checksum_address(contract_owner_account.address)
       })
     else:
-      # running on the Goerli testnet
-      logger.info("Running on Goerli testnet")
+      # running on the Sepolia testnet
+      logger.info("Running on Sepolia testnet")
       # # for Goerli, make sure to inject the poa middleware
       # web3.middleware_onion.inject(geth_poa_middleware, layer=0)
       # Set Gas Price
@@ -688,8 +689,8 @@ def handle_choice(data):
       # running on a ganache test network
       logger.info("Running on a ganache test network")
     else:
-      # running on the Goerli testnet
-      logger.info("Running on Goerli testnet")
+      # running on the Sepolia testnet
+      logger.info("Running on Sepolia testnet")
     
     rps_txn = rps_contract.functions.decideWinner(web3.to_checksum_address(winner_address), game['id']).build_transaction({
       'from': contract_owner_checksum_address,
