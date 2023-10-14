@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # Create a parser for the command-line arguments
 # e.g. python your_script.py --env .env.prod
 parser = argparse.ArgumentParser(description='Loads variables from the specified .env file and prints them.')
-parser.add_argument('--env', type=str, default='.env.local', help='The .env file to load')
+parser.add_argument('--env', type=str, default='.env.ganache', help='The .env file to load')
 args = parser.parse_args()
 # Load the .env file specified in the command-line arguments
 load_dotenv(args.env)
@@ -46,13 +46,23 @@ logger.info(f"Contract owner private key: {CONTRACT_OWNER_PRIVATE_KEY}")
 ARBITER_ADDRESS = os.getenv("ARBITER_ADDRESS")
 logger.info(f"Arbiter address: {ARBITER_ADDRESS}")
 RPS_CONTRACT_FACTORY_ADDRESS = os.getenv("RPS_CONTRACT_FACTORY_ADDRESS")
+logger.info(f"RPS contract factory address: {RPS_CONTRACT_FACTORY_ADDRESS}")
+KEYFILE = os.getenv("KEYFILE")
+logger.info(f"Keyfile: {KEYFILE}")
+CERTFILE = os.getenv("CERTFILE")
+logger.info(f"Certfile: {CERTFILE}")
+
 # Connection
 web3 = Web3(Web3.HTTPProvider(HTTP_PROVIDER))
-
-if 'test' in args.env:
-  logger.info("Running on testnet")
-  # for Goerli, make sure to inject the poa middleware
+if 'sepolia' in args.env or 'mainnet' in args.env:
   web3.middleware_onion.inject(geth_poa_middleware, layer=0)
+
+if 'ganache' in args.env:
+  logger.info("Running on Ganache testnet")
+elif 'sepolia' in args.env:
+  logger.info("Running on Sepolia testnet")
+elif 'mainnet' in args.env:
+  logger.info("Running on Ethereum mainnet")
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key'
@@ -64,6 +74,7 @@ players = {}
 
 rps_contract_factory_abi = None
 rps_contract_abi = None
+gas_limit = 5000000
 
 def get_service(api_name, api_version, scopes, key_file_location):
   """Get a service that communicates to a Google API.
@@ -233,7 +244,7 @@ def refund_wager(game, payee):
   return tx_hash
 
 def get_new_game():
-  new_game = {
+  return {
     'id': str(uuid.uuid4()),
     'player1': None,
     'player2': None,
@@ -252,8 +263,6 @@ def get_new_game():
     'receipt': None
   }
   """
-  return new_game
-
 def get_new_player():
   return {
     'game_id': None,
@@ -405,7 +414,9 @@ def join_game():
     return
   # if both players have the same address, return
   if player1['address'] == player2['address']:
-      logger.info('Both players have the same address.')
+      # put player2 back in the queue
+      player_queue.put(player2)
+      logger.info('Both players have the same address. Putting the second player back in the queue.')
       return
   
   # determine if either player has already joined a game
@@ -489,14 +500,14 @@ def handle_accept_wager(data):
     logger.info(f"Current game state in on accept_wager after both players have accepted wagers: {game}")
 
     tx_hash = None
-    arbiter_fee_percentage = int(6.5 * 10**2) # 6.5%
+    arbiter_fee_percentage = int(9.5 * 10**2) # 9.5%
     contract_owner_account = Account.from_key(CONTRACT_OWNER_PRIVATE_KEY)
     logger.info(f"Contract owner address: {contract_owner_account.address}")
 
     # Create contract using createContract function
-    # Use your deployed factory contract address
+    # Use deployed factory contract address
     factory_contract_address = web3.to_checksum_address(RPS_CONTRACT_FACTORY_ADDRESS)
-    # Now interact with your factory contract
+    # interact with factory contract
     global rps_contract_factory_abi
     factory_contract = web3.eth.contract(address=factory_contract_address, abi=rps_contract_factory_abi)
 
@@ -508,11 +519,12 @@ def handle_accept_wager(data):
       tx_hash = factory_contract.functions.createContract(arbiter_fee_percentage, game_id).transact({
         'from': web3.to_checksum_address(contract_owner_account.address)
       })
-    else:
-      # running on the Sepolia testnet
-      logger.info("Running on Sepolia testnet")
-      # # for Goerli, make sure to inject the poa middleware
-      # web3.middleware_onion.inject(geth_poa_middleware, layer=0)
+    elif 'sepolia' in args.env or 'mainnet' in args.env:
+      # running on the Sepolia testnet or Ethereum mainnet
+      if 'sepolia' in args.env:
+        logger.info("Running on Sepolia testnet")
+      else:
+        logger.info("Running on Ethereum mainnet")    
       # Set Gas Price
       gas_price = web3.eth.gas_price  # Fetch the current gas price
 
@@ -520,20 +532,20 @@ def handle_accept_wager(data):
       nonce = web3.eth.get_transaction_count(contract_owner_account.address)  # Get the nonce
 
       # Create contract using createContract function      
-      construct_txn = factory_contract.functions.createContract(
+      create_txn = factory_contract.functions.createContract(
         arbiter_fee_percentage,
         game_id
       ).build_transaction({
         'from': web3.to_checksum_address(contract_owner_account.address),
         'nonce': nonce,
-        'gas': 5000000,  # You may need to change the gas limit
+        'gas': gas_limit,  # You may need to change the gas limit
         'gasPrice': math.ceil(gas_price * 1.05)
       })
 
-    try:
-      signed = contract_owner_account.sign_transaction(construct_txn)
+      signed = contract_owner_account.sign_transaction(create_txn)
 
       tx_hash = web3.eth.send_raw_transaction(signed.rawTransaction)
+    try:
       tx_receipt = None
 
       # Get the transaction receipt for the contract creation transaction
@@ -549,14 +561,12 @@ def handle_accept_wager(data):
       # notify both players there was an error creating the contract
       emit('contract_creation_error', room=game['player1']['address'])
       emit('contract_creation_error', room=game['player2']['address'])
-
       return
     except Exception as e:
       logger.error(f"An error occurred: {str(e)}")
       # notify both players there was an error creating the contract
       emit('contract_creation_error', room=game['player1']['address'])
       emit('contract_creation_error', room=game['player2']['address'])
-
       return
     
     # Call getContracts function
@@ -575,7 +585,7 @@ def handle_accept_wager(data):
     rps_contract_address = web3.to_checksum_address(created_contract_address)
     logger.info(f"Contract address: {rps_contract_address}")
     
-    # Now interact with the rps contract
+    # interact with the rps contract
     global rps_contract_abi
     rps_contract = web3.eth.contract(address=rps_contract_address, abi=rps_contract_abi)
 
@@ -594,7 +604,7 @@ def handle_accept_wager(data):
     set_arbiter_txn = rps_contract.functions.setArbiter(web3.to_checksum_address(ARBITER_ADDRESS), game['id']).build_transaction({
       'from': contract_owner_checksum_address,
       'nonce': nonce,
-      'gas': 800000,  # You may need to change the gas limit
+      'gas': gas_limit,  # You may need to change the gas limit
       'gasPrice': math.ceil(gas_price * 1.05)
     })
 
@@ -617,7 +627,6 @@ def handle_accept_wager(data):
       'your_wager': game['player2']['wager'],
       'opponent_wager': game['player1']['wager'],
     }, room=game['player2']['address'])
-
 
 @socketio.on('decline_wager')
 def handle_decline_wager(data):
@@ -692,7 +701,7 @@ def handle_choice(data):
     rps_contract_address = web3.to_checksum_address(game['contract_address'])
     logger.info(f"Contract address: {rps_contract_address}")
     
-    # Now interact with the rps contract
+    # interact with the rps contract
     global rps_contract_abi
     rps_contract = web3.eth.contract(address=rps_contract_address, abi=rps_contract_abi)
 
@@ -710,14 +719,17 @@ def handle_choice(data):
     if 'ganache' in args.env:
       # running on a ganache test network
       logger.info("Running on a ganache test network")
-    else:
+    elif 'sepolia' in args.env:
       # running on the Sepolia testnet
       logger.info("Running on Sepolia testnet")
+    elif 'mainnet' in args.env:
+      # running on the Ethereum mainnet
+      logger.info("Running on Ethereum mainnet")
     
     rps_txn = rps_contract.functions.decideWinner(web3.to_checksum_address(winner_address), game['id']).build_transaction({
       'from': contract_owner_checksum_address,
       'nonce': nonce,
-      'gas': 800000,  # You may need to change the gas limit
+      'gas': gas_limit,  # You may need to change the gas limit
       'gasPrice': math.ceil(gas_price * 1.05)
     })
 
@@ -798,8 +810,8 @@ if __name__ == '__main__':
 
   http_server = WSGIServer(('0.0.0.0', 443),
                            app,
-                           keyfile='/etc/letsencrypt/live/dev.generalsolutions43.com/privkey.pem',
-                           certfile='/etc/letsencrypt/live/dev.generalsolutions43.com/fullchain.pem',
+                           keyfile=KEYFILE,
+                           certfile=CERTFILE,
                            handler_class=WebSocketHandler)
 
   # http_server = WSGIServer(('0.0.0.0', 8000), app, handler_class=WebSocketHandler)

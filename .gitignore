@@ -1,4 +1,4 @@
-.env.test
+.env.sepolia
 .env.mainnet
 .env.ganache
 contracts
