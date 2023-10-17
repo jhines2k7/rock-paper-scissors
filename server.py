@@ -352,18 +352,25 @@ def handle_contract_rejected(data):
     # did the other player accept the contract?
     if game['player2']['contract_accepted']:
       payee=game['player2']
-      # refund the player that accepted the contract
-      tx_hash = refund_wager(game, payee=payee)
-      emit('player_stake_refunded', { 'transaction_hash': tx_hash }, room=game['player2']['address'])
   else:
     # did the other player accept the contract?
     if game['player1']['contract_accepted']:
       payee=game['player1']
       # refund the player that accepted the contract
-      tx_hash = refund_wager(game, payee=payee)
-      emit('player_stake_refunded', { 'transaction_hash': tx_hash }, room=game['player2']['address'])
-  
+      # tx_hash = refund_wager(game, payee=payee)
+      # emit('player_stake_refunded', { 'transaction_hash': tx_hash }, room=game['player2']['address'])      
+
   game['game_over'] = True
+
+  # refund the player that accepted the contract
+  tx_hash = refund_wager(game, payee=payee)
+  # send player a txn link to etherscan
+  etherscan_link = None
+  if 'sepolia' in args.env or 'ganache' in args.env:
+    etherscan_link = f"https://sepolia.etherscan.io/tx/{web3.to_hex(tx_hash)}"
+  elif 'mainnet' in args.env:
+    etherscan_link = f"https://etherscan.io/tx/{web3.to_hex(tx_hash)}"
+  emit('player_stake_refunded', { 'etherscan_link': etherscan_link }, room=payee['address'])
   
 @socketio.on('join_contract_confirmation')
 def handle_join_contract_confirmation(data):
@@ -389,13 +396,19 @@ def handle_join_contract_confirmation(data):
       payee = game['player2']
 
     tx_hash = refund_wager(game, payee=payee)
+    # send player a txn link to etherscan
+    etherscan_link = None
+    if 'sepolia' in args.env or 'ganache' in args.env:
+      etherscan_link = f"https://sepolia.etherscan.io/tx/{web3.to_hex(tx_hash)}"
+    elif 'mainnet' in args.env:
+      etherscan_link = f"https://etherscan.io/tx/{web3.to_hex(tx_hash)}"
     
     if game['insufficient_funds']:
       logger.info('One player did not have the funds to join the contract. Notifying the opposing player and issuing a refund.')
-      emit('player_stake_refunded', { 'transaction_hash': tx_hash, 'reason': 'insufficient_funds' }, room=payee['address'])
+      emit('player_stake_refunded', { 'etherscan_link': etherscan_link, 'reason': 'insufficient_funds' }, room=payee['address'])
     else:
       logger.info('One player decided not to join the contract. Notifying the opposing player and issuing a refund.')
-      emit('player_stake_refunded', { 'transaction_hash': tx_hash, 'reason': 'contract_rejected' }, room=payee['address'])
+      emit('player_stake_refunded', { 'etherscan_link': etherscan_link, 'reason': 'contract_rejected' }, room=payee['address'])
 
 @socketio.on('join_contract_hash')
 def handle_join_contract_hash(data):
@@ -804,22 +817,33 @@ def handle_choice(data):
     # GAME OVER, man!
     game['game_over'] = True
 
+    etherscan_link = None
+    # send player a txn link to etherscan
+    if 'sepolia' in args.env or 'ganache' in args.env:
+      etherscan_link = f"https://sepolia.etherscan.io/tx/{web3.to_hex(tx_hash)}"
+    elif 'mainnet' in args.env:
+      etherscan_link = f"https://etherscan.io/tx/{web3.to_hex(tx_hash)}"
+
     if winner is None and loser is None:
       # emit an event to both players to inform them that the game is a draw
       emit('draw', {
+        'etherscan_link': etherscan_link,
         'your_choice': game['player1']['choice'],
         'opp_choice': game['player2']['choice']}, room=game['player1']['address'])
       emit('draw', {
+        'etherscan_link': etherscan_link,
         'your_choice': game['player2']['choice'],
         'opp_choice': game['player1']['choice']}, room=game['player2']['address'])
     else:
       # emit an event to both players to inform them of the result
       emit('you_win', {
+        'etherscan_link': etherscan_link,
         'your_choice': game['winner']['choice'],
         'opp_choice': game['loser']['choice'],
         'winnings': game['winner']['winnings']
         }, room=game['winner']['address'])
       emit('you_lose', {
+        'etherscan_link': etherscan_link,
         'your_choice': game['loser']['choice'],
         'opp_choice': game['winner']['choice'], 
         'losses': game['loser']['losses']
@@ -861,7 +885,5 @@ if __name__ == '__main__':
                            keyfile=KEYFILE,
                            certfile=CERTFILE,
                            handler_class=WebSocketHandler)
-
-  # http_server = WSGIServer(('0.0.0.0', 8000), app, handler_class=WebSocketHandler)
 
   http_server.serve_forever()
