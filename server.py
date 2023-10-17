@@ -7,12 +7,12 @@ import argparse
 import os
 import math
 import queue
+import binascii
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.oauth2 import service_account
-from googleapiclient.http import MediaFileUpload
 from googleapiclient.http import MediaIoBaseDownload
 from gevent import monkey
 monkey.patch_all()
@@ -24,6 +24,8 @@ from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from eth_account import Account
 from dotenv import load_dotenv
+from logging.handlers import RotatingFileHandler
+from datetime import datetime
 
 logging.basicConfig(
   stream=sys.stderr,
@@ -32,6 +34,29 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# Creating a logger that will write transaction hashes to a file
+txn_logger = logging.getLogger('txn_logger')
+txn_logger.setLevel(logging.CRITICAL)
+
+# Creates a file handler which writes DEBUG messages or higher to the file
+# Get current date and time
+now = datetime.now()
+
+# Format datetime string to be used in the filename
+dt_string = now.strftime("%d_%m_%Y_%H_%M_%S")
+
+log_file_name = 'txn_hashes_{}.log'.format(dt_string)
+logger.info(f"Log file name: {log_file_name}")
+log_file_handler = RotatingFileHandler('logs/' + log_file_name, maxBytes=1e6, backupCount=50)
+log_file_handler.setLevel(logging.CRITICAL)
+
+# Creates a formatter and adds it to the handler
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+log_file_handler.setFormatter(formatter)
+
+# Adds the handler to the logger
+txn_logger.addHandler(log_file_handler)
 
 # Create a parser for the command-line arguments
 # e.g. python your_script.py --env .env.prod
@@ -75,6 +100,15 @@ players = {}
 rps_contract_factory_abi = None
 rps_contract_abi = None
 gas_limit = 5000000
+
+def convert_bytes_to_hex(bytes_value):
+  hex_value = binascii.b2a_hex(bytes_value)
+  hex_str = hex_value.decode()  # Convert bytes to str
+
+  # Add '0x' at the beginning to indicate that it's a hex number
+  hex_str = '0x' + hex_str
+
+  return hex_str
 
 def get_service(api_name, api_version, scopes, key_file_location):
   """Get a service that communicates to a Google API.
@@ -149,7 +183,7 @@ def download_contract_abi():
       # Get the file metadata
       file_metadata = service.files().get(fileId=file['id']).execute()
       file_name = file_metadata['name']
-      created_time = datetime.datetime.strptime(file['createdTime'], "%Y-%m-%dT%H:%M:%S.%fZ")
+      created_time = datetime.strptime(file['createdTime'], "%Y-%m-%dT%H:%M:%S.%fZ")
       logger.info(f"File Name: {file_name}, Created Time: {created_time}")
 
       # Download the file content
@@ -220,20 +254,23 @@ def refund_wager(game, payee):
   if 'ganache' in args.env:
     # running on a ganache test network
     logger.info("Running on a ganache test network")
-  else:
+  elif 'sepolia' in args.env:
     # running on the Sepolia testnet
     logger.info("Running on Sepolia testnet")
+  elif 'mainnet' in args.env:
+    # running on the Ethereum mainnet
+    logger.info("Running on Ethereum mainnet")
 
   rps_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee['address']), game['id']).build_transaction({
     'from': arbiter_checksum_address,
     'nonce': nonce,
-    'gas': 800000,  # You may need to change the gas limit
+    'gas': gas_limit,  # You may need to change the gas limit
     'gasPrice': math.ceil(gas_price * 1.05)
   })
 
   signed = contract_owner_account.sign_transaction(rps_txn)
   tx_hash = web3.eth.send_raw_transaction(signed.rawTransaction)
-  
+  txn_logger.critical(f"Refund wager transaction hash: {web3.to_hex(tx_hash)}, game_id: {game['id']}, payee: {payee['address']}")
   tx_receipt = None
 
   # Get the transaction receipt for the decide winner transaction
@@ -365,6 +402,9 @@ def handle_join_contract_hash(data):
   logger.info('join contract transaction hash received: %s', data)
   game = games[data['game_id']]
   game['transactions'].append(data['transaction_hash'])
+  
+  txn_logger.critical(f"Join contract transaction hash: {data['transaction_hash']}, game_id: {game['id']}, address: {data['address']}")
+  
   logger.info(f"Current game state in on join_contract_hash: {game}")
 
 @socketio.on('join_contract_receipt')
@@ -500,7 +540,7 @@ def handle_accept_wager(data):
     logger.info(f"Current game state in on accept_wager after both players have accepted wagers: {game}")
 
     tx_hash = None
-    arbiter_fee_percentage = int(9.5 * 10**2) # 9.5%
+    arbiter_fee_percentage = int(9.5 * 100) # 9.5%
     contract_owner_account = Account.from_key(CONTRACT_OWNER_PRIVATE_KEY)
     logger.info(f"Contract owner address: {contract_owner_account.address}")
 
@@ -543,8 +583,8 @@ def handle_accept_wager(data):
       })
 
       signed = contract_owner_account.sign_transaction(create_txn)
-
       tx_hash = web3.eth.send_raw_transaction(signed.rawTransaction)
+      txn_logger.critical(f"Create contract transaction hash: {web3.to_hex(tx_hash)}, game_id: {game['id']}, address: {contract_owner_account.address}")
     try:
       tx_receipt = None
 
@@ -610,6 +650,7 @@ def handle_accept_wager(data):
 
     signed = contract_owner_account.sign_transaction(set_arbiter_txn)
     tx_hash = web3.eth.send_raw_transaction(signed.rawTransaction)
+    txn_logger.critical(f"Set arbiter transaction hash: {web3.to_hex(tx_hash)}, game_id: {game['id']}, address: {contract_owner_account.address}")
 
     # Get the transaction receipt for the contract creation transaction
     tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
@@ -736,6 +777,13 @@ def handle_choice(data):
     try:
       signed = contract_owner_account.sign_transaction(rps_txn)
       tx_hash = web3.eth.send_raw_transaction(signed.rawTransaction)
+      
+      # log differently in case of draw
+      if winner is None and loser is None:
+        txn_logger.critical(f"Game resulted in a draw transaction hash: {web3.to_hex(tx_hash)}, game_id: {game['id']}, address: {contract_owner_account.address}, player1: {game['player1']['address']}, player2: {game['player2']['address']}")
+      else:
+        txn_logger.critical(f"Decide winner transaction hash: {web3.to_hex(tx_hash)}, game_id: {game['id']}, address: {contract_owner_account.address}, winner: {winner['address']}, loser: {loser['address']}")
+      
       tx_receipt = None
 
       # Get the transaction receipt for the decide winner transaction
