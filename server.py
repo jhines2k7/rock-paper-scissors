@@ -8,6 +8,7 @@ import os
 import math
 import queue
 import binascii
+import requests
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -15,7 +16,7 @@ from googleapiclient.errors import HttpError
 from google.oauth2 import service_account
 from googleapiclient.http import MediaIoBaseDownload
 from gevent import monkey
-monkey.patch_all()
+# monkey.patch_all()
 
 from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, join_room, emit, leave_room
@@ -70,8 +71,8 @@ CONTRACT_OWNER_PRIVATE_KEY = os.getenv("CONTRACT_OWNER_PRIVATE_KEY")
 logger.info(f"Contract owner private key: {CONTRACT_OWNER_PRIVATE_KEY}")
 ARBITER_ADDRESS = os.getenv("ARBITER_ADDRESS")
 logger.info(f"Arbiter address: {ARBITER_ADDRESS}")
-RPS_CONTRACT_FACTORY_ADDRESS = os.getenv("RPS_CONTRACT_FACTORY_ADDRESS")
-logger.info(f"RPS contract factory address: {RPS_CONTRACT_FACTORY_ADDRESS}")
+RPS_CONTRACT_ADDRESS = os.getenv("RPS_CONTRACT_ADDRESS")
+logger.info(f"RPS contract factory address: {RPS_CONTRACT_ADDRESS}")
 KEYFILE = os.getenv("KEYFILE")
 logger.info(f"Keyfile: {KEYFILE}")
 CERTFILE = os.getenv("CERTFILE")
@@ -100,6 +101,16 @@ players = {}
 rps_contract_factory_abi = None
 rps_contract_abi = None
 gas_limit = 5000000
+
+def get_eth_price():
+  url = "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd"
+  response = requests.get(url)
+  data = response.json()
+  return data['ethereum']['usd']
+
+def usd_to_eth(usd):
+  eth_price = get_eth_price()
+  return usd / eth_price
 
 def convert_bytes_to_hex(bytes_value):
   hex_value = binascii.b2a_hex(bytes_value)
@@ -200,10 +211,6 @@ def download_contract_abi():
     logger.info('Contract ABIs downloaded successfully!')
 
     # Load and parse the contract ABIs.
-    with open('contracts/RPSContractFactory.json') as f:
-      global rps_contract_factory_abi
-      factory_json = json.load(f)
-      rps_contract_factory_abi = factory_json['abi']
     with open('contracts/RPSContract.json') as f:
       global rps_contract_abi
       rps_json = json.load(f)
@@ -234,7 +241,7 @@ def refund_wager(game, payee):
   logger.info('Calling refundWager contract function')
   
   logger.info(f"Payee account address: {payee['address']}")
-  rps_contract_address = web3.to_checksum_address(game['contract_address'])
+  rps_contract_address = web3.to_checksum_address(RPS_CONTRACT_ADDRESS)
   logger.info(f"Contract address: {rps_contract_address}")
   
   # Now interact with the rps contract
@@ -249,7 +256,7 @@ def refund_wager(game, payee):
   arbiter_checksum_address = web3.to_checksum_address(contract_owner_account.address)
 
   # Sign transaction using the private key of the arbiter account
-  nonce = web3.eth.get_transaction_count(arbiter_checksum_address)  # Get the nonce
+  nonce = web3.eth.get_transaction_count(arbiter_checksum_address)
 
   if 'ganache' in args.env:
     # running on a ganache test network
@@ -261,10 +268,15 @@ def refund_wager(game, payee):
     # running on the Ethereum mainnet
     logger.info("Running on Ethereum mainnet")
 
-  rps_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee['address']), game['id']).build_transaction({
+  refund_in_ether = usd_to_eth(float(payee['wager'].replace('$', '')))
+  logger.info(f"Refund in ether: {refund_in_ether}")
+  refund_in_wei = web3.to_wei(refund_in_ether, 'ether')
+  logger.info(f"Refund in wei: {refund_in_wei}")
+
+  rps_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee['address']), refund_in_wei).build_transaction({
     'from': arbiter_checksum_address,
     'nonce': nonce,
-    'gas': gas_limit,  # You may need to change the gas limit
+    'gas': gas_limit,
     'gasPrice': math.ceil(gas_price * 1.05)
   })
 
@@ -372,7 +384,7 @@ def handle_contract_rejected(data):
     etherscan_link = f"https://etherscan.io/tx/{web3.to_hex(tx_hash)}"
   emit('player_stake_refunded', { 'etherscan_link': etherscan_link }, room=payee['address'])
   
-@socketio.on('join_contract_confirmation')
+@socketio.on('pay_stake_confirmation')
 def handle_join_contract_confirmation(data):
   game = games[data['game_id']]
   logger.info('join contract confirmation number: %s', data)
@@ -410,7 +422,7 @@ def handle_join_contract_confirmation(data):
       logger.info('One player decided not to join the contract. Notifying the opposing player and issuing a refund.')
       emit('player_stake_refunded', { 'etherscan_link': etherscan_link, 'reason': 'contract_rejected' }, room=payee['address'])
 
-@socketio.on('join_contract_hash')
+@socketio.on('pay_stake_hash')
 def handle_join_contract_hash(data):
   logger.info('join contract transaction hash received: %s', data)
   game = games[data['game_id']]
@@ -420,7 +432,7 @@ def handle_join_contract_hash(data):
   
   logger.info(f"Current game state in on join_contract_hash: {game}")
 
-@socketio.on('join_contract_receipt')
+@socketio.on('pay_stake_receipt')
 def handle_join_contract_receipt(data):
   game = games[data['game_id']]
   logger.info('join contract transaction receipt received: %s', data)
@@ -491,6 +503,7 @@ def join_game():
   # set the player1 and player2
   game['player1'] = player1
   game['player2'] = player2
+  game['address'] = RPS_CONTRACT_ADDRESS
   # add the game to the games dictionary
   games[game['id']] = game
 
@@ -545,139 +558,15 @@ def handle_accept_wager(data):
   logger.info('Player %s accepted the wager. Waiting for opponent.', address)
 
   if game['player1']['wager_accepted'] and game['player2']['wager_accepted']:
-    logger.info('Both players have accepted a wager. Generating contract.')
-    # emit an event to both players to inform them that the contract is being generated
-    emit('generating_contract', room=game['player1']['address'])
-    emit('generating_contract', room=game['player2']['address'])
-
     logger.info(f"Current game state in on accept_wager after both players have accepted wagers: {game}")
-
-    tx_hash = None
-    arbiter_fee_percentage = int(9.5 * 100) # 9.5%
-    contract_owner_account = Account.from_key(CONTRACT_OWNER_PRIVATE_KEY)
-    logger.info(f"Contract owner address: {contract_owner_account.address}")
-
-    # Create contract using createContract function
-    # Use deployed factory contract address
-    factory_contract_address = web3.to_checksum_address(RPS_CONTRACT_FACTORY_ADDRESS)
-    # interact with factory contract
-    global rps_contract_factory_abi
-    factory_contract = web3.eth.contract(address=factory_contract_address, abi=rps_contract_factory_abi)
-
-    game_id = game['id']
-
-    if 'ganache' in args.env:
-      # running on a ganache test network
-      logger.info("Running on a ganache test network")
-      tx_hash = factory_contract.functions.createContract(arbiter_fee_percentage, game_id).transact({
-        'from': web3.to_checksum_address(contract_owner_account.address)
-      })
-    elif 'sepolia' in args.env or 'mainnet' in args.env:
-      # running on the Sepolia testnet or Ethereum mainnet
-      if 'sepolia' in args.env:
-        logger.info("Running on Sepolia testnet")
-      else:
-        logger.info("Running on Ethereum mainnet")    
-      # Set Gas Price
-      gas_price = web3.eth.gas_price  # Fetch the current gas price
-
-      # Sign transaction using the private key of the owner account
-      nonce = web3.eth.get_transaction_count(contract_owner_account.address)  # Get the nonce
-
-      # Create contract using createContract function      
-      create_txn = factory_contract.functions.createContract(
-        arbiter_fee_percentage,
-        game_id
-      ).build_transaction({
-        'from': web3.to_checksum_address(contract_owner_account.address),
-        'nonce': nonce,
-        'gas': gas_limit,  # You may need to change the gas limit
-        'gasPrice': math.ceil(gas_price * 1.05)
-      })
-
-      signed = contract_owner_account.sign_transaction(create_txn)
-      tx_hash = web3.eth.send_raw_transaction(signed.rawTransaction)
-      txn_logger.critical(f"Create contract transaction hash: {web3.to_hex(tx_hash)}, game_id: {game['id']}, address: {contract_owner_account.address}")
-    try:
-      tx_receipt = None
-
-      # Get the transaction receipt for the contract creation transaction
-      tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
-      game['transactions'].append(tx_receipt)
-      logger.info(f"Transaction receipt: {tx_receipt}")
-    except ValueError as e:
-      if 'insufficient funds for gas * price + value' in str(e):
-        logger.error(e)
-        logger.error("The contract owner account does not have the funds to cover the cost of creating the RPSContract for this game.")        
-      else:
-        logger.error(f"A ValueError occurred: {str(e)}")
-      # notify both players there was an error creating the contract
-      emit('contract_creation_error', room=game['player1']['address'])
-      emit('contract_creation_error', room=game['player2']['address'])
-      return
-    except Exception as e:
-      logger.error(f"An error occurred: {str(e)}")
-      # notify both players there was an error creating the contract
-      emit('contract_creation_error', room=game['player1']['address'])
-      emit('contract_creation_error', room=game['player2']['address'])
-      return
-    
-    # Call getContracts function
-    contract_addresses = factory_contract.functions.getContracts().call({
-      "from": web3.to_checksum_address(contract_owner_account.address)
-    })
-    logger.info(f"Contract addresses: {contract_addresses}")
-    # Call the getLatestContract function
-    created_contract_address = factory_contract.functions.getLatestContract().call({
-      "from": web3.to_checksum_address(contract_owner_account.address)
-    })  
-    logger.info(f"Created contract address: {created_contract_address}")
-    game['contract_address'] = created_contract_address
-
-    # set arbiter for the contract
-    rps_contract_address = web3.to_checksum_address(created_contract_address)
-    logger.info(f"Contract address: {rps_contract_address}")
-    
-    # interact with the rps contract
-    global rps_contract_abi
-    rps_contract = web3.eth.contract(address=rps_contract_address, abi=rps_contract_abi)
-
-    tx_hash = None
-    set_arbiter_txn = None
-
-    # Set Gas Price
-    gas_price = web3.eth.gas_price  # Fetch the current gas price
-    contract_owner_checksum_address = web3.to_checksum_address(contract_owner_account.address)
-
-    # Sign transaction using the private key of the contract owner account
-    nonce = web3.eth.get_transaction_count(contract_owner_checksum_address)  # Get the nonce
-
-    # call setArbiter
-    logger.info('Calling setArbiter contract function')
-    set_arbiter_txn = rps_contract.functions.setArbiter(web3.to_checksum_address(ARBITER_ADDRESS), game['id']).build_transaction({
-      'from': contract_owner_checksum_address,
-      'nonce': nonce,
-      'gas': gas_limit,  # You may need to change the gas limit
-      'gasPrice': math.ceil(gas_price * 1.05)
-    })
-
-    signed = contract_owner_account.sign_transaction(set_arbiter_txn)
-    tx_hash = web3.eth.send_raw_transaction(signed.rawTransaction)
-    txn_logger.critical(f"Set arbiter transaction hash: {web3.to_hex(tx_hash)}, game_id: {game['id']}, address: {contract_owner_account.address}")
-
-    # Get the transaction receipt for the contract creation transaction
-    tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
-    game['transactions'].append(tx_receipt)
-    logger.info(f"Transaction receipt: {tx_receipt}")
-
     # notify both players that the contract has been created
-    emit('contract_created', {
-      'contract_address': created_contract_address, 
+    emit('both_wagers_accepted', {
+      'contract_address': RPS_CONTRACT_ADDRESS, 
       'your_wager': game['player1']['wager'],
       'opponent_wager': game['player2']['wager'],
     }, room=game['player1']['address'])
-    emit('contract_created', {
-      'contract_address': created_contract_address,
+    emit('both_wagers_accepted', {
+      'contract_address': RPS_CONTRACT_ADDRESS,
       'your_wager': game['player2']['wager'],
       'opponent_wager': game['player1']['wager'],
     }, room=game['player2']['address'])
@@ -727,14 +616,50 @@ def handle_choice(data):
 
     contract_owner_account = Account.from_key(CONTRACT_OWNER_PRIVATE_KEY)
     logger.info(f"Contract owner account address: {contract_owner_account.address}")
+
+    player_1_stake_ether = usd_to_eth(float(game['player1']['wager'].replace('$', '')))
+    logger.info(f"Player 1 stake in ether: {player_1_stake_ether}")
+    player_1_stake_wei = web3.to_wei(player_1_stake_ether, 'ether')
+    logger.info(f"Player 1 stake in wei: {player_1_stake_wei}")
+
+    player_2_stake_in_ether = usd_to_eth(float(game['player2']['wager'].replace('$', '')))
+    logger.info(f"Player 2 stake in ether: {player_2_stake_in_ether}")
+    player_2_stake_in_wei = web3.to_wei(player_2_stake_in_ether, 'ether')
+    logger.info(f"Player 2 stake in wei: {player_2_stake_in_wei}")
+        
+        # call payWinner contract function here
+    logger.info('Calling payWinner contract function')
     
+    rps_contract_address = web3.to_checksum_address(RPS_CONTRACT_ADDRESS)
+    logger.info(f"Contract address: {rps_contract_address}")
+
+    # interact with the rps contract
+    global rps_contract_abi
+    rps_contract = web3.eth.contract(address=rps_contract_address, abi=rps_contract_abi)
+    rps_txn = None
+    
+    # Set Gas Price
+    gas_price = web3.eth.gas_price  # Fetch the current gas price
+    contract_owner_checksum_address = web3.to_checksum_address(contract_owner_account.address)
+
+    # Sign transaction using the private key of the contract owner account
+    nonce = web3.eth.get_transaction_count(contract_owner_checksum_address)  # Get the nonce
+
     if winner is None and loser is None:
       logger.info('Game is a draw.')
       # set the game winner and loser
       game['winner'] = None
       game['loser'] = None
 
-      winner_address = ARBITER_ADDRESS
+      player_1_address = game['player1']['address']
+      player_2_address = game['player2']['address']
+
+      rps_txn = rps_contract.functions.payDraw(web3.to_checksum_address(player_1_address), web3.to_checksum_address(player_2_address), player_1_stake_wei, player_2_stake_in_wei).build_transaction({
+        'from': contract_owner_checksum_address,
+        'nonce': nonce,
+        'gas': gas_limit,  # You may need to change the gas limit
+        'gasPrice': math.ceil(gas_price * 1.05)
+      })
     else:
       game['winner'] = winner
       game['loser'] = loser
@@ -747,28 +672,17 @@ def handle_choice(data):
       game['loser']['losses'] = loser['wager']
 
       winner_address = winner['address']
+      logger.info(f"Winner account address: {winner_address}")
 
-    # call decideWinner contract function here
-    logger.info('Calling decideWinner contract function')
-    
-    logger.info(f"Winner account address: {winner_address}")
-    rps_contract_address = web3.to_checksum_address(game['contract_address'])
-    logger.info(f"Contract address: {rps_contract_address}")
-    
-    # interact with the rps contract
-    global rps_contract_abi
-    rps_contract = web3.eth.contract(address=rps_contract_address, abi=rps_contract_abi)
+      rps_txn = rps_contract.functions.payWinner(web3.to_checksum_address(winner_address), player_1_stake_wei, player_2_stake_in_wei).build_transaction({
+        'from': contract_owner_checksum_address,
+        'nonce': nonce,
+        'gas': gas_limit,  # You may need to change the gas limit
+        'gasPrice': math.ceil(gas_price * 1.05)
+      })
 
     tx_hash = None
-    rps_txn = None
     tx_receipt = None
-
-    # Set Gas Price
-    gas_price = web3.eth.gas_price  # Fetch the current gas price
-    contract_owner_checksum_address = web3.to_checksum_address(contract_owner_account.address)
-
-    # Sign transaction using the private key of the contract owner account
-    nonce = web3.eth.get_transaction_count(contract_owner_checksum_address)  # Get the nonce
 
     if 'ganache' in args.env:
       # running on a ganache test network
@@ -780,13 +694,6 @@ def handle_choice(data):
       # running on the Ethereum mainnet
       logger.info("Running on Ethereum mainnet")
     
-    rps_txn = rps_contract.functions.decideWinner(web3.to_checksum_address(winner_address), game['id']).build_transaction({
-      'from': contract_owner_checksum_address,
-      'nonce': nonce,
-      'gas': gas_limit,  # You may need to change the gas limit
-      'gasPrice': math.ceil(gas_price * 1.05)
-    })
-
     try:
       signed = contract_owner_account.sign_transaction(rps_txn)
       tx_hash = web3.eth.send_raw_transaction(signed.rawTransaction)
@@ -795,24 +702,24 @@ def handle_choice(data):
       if winner is None and loser is None:
         txn_logger.critical(f"Game resulted in a draw transaction hash: {web3.to_hex(tx_hash)}, game_id: {game['id']}, address: {contract_owner_account.address}, player1: {game['player1']['address']}, player2: {game['player2']['address']}")
       else:
-        txn_logger.critical(f"Decide winner transaction hash: {web3.to_hex(tx_hash)}, game_id: {game['id']}, address: {contract_owner_account.address}, winner: {winner['address']}, loser: {loser['address']}")
+        txn_logger.critical(f"Pay winner transaction hash: {web3.to_hex(tx_hash)}, game_id: {game['id']}, address: {contract_owner_account.address}, winner: {winner['address']}, loser: {loser['address']}")
       
       tx_receipt = None
 
       # Get the transaction receipt for the decide winner transaction
       tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
-      logger.info(f'Transaction receipt after decideWinner was called: {tx_receipt}')
+      logger.info(f'Transaction receipt after payWinner was called: {tx_receipt}')
       game['transactions'].append(tx_receipt)
     except ValueError as e:
       logger.error(f"A ValueError occurred: {str(e)}")
       # notify both players there was an error deciding the winner
-      emit('decide_winner_error', room=game['player1']['address'])
-      emit('decide_winner_error', room=game['player2']['address'])
+      emit('pay_winner_error', room=game['player1']['address'])
+      emit('pay_winner_error', room=game['player2']['address'])
     except Exception as e:
       logger.error(f"An error occurred: {str(e)}")
       # notify both players there was an deciding the winner
-      emit('decide_winner_error', room=game['player1']['address'])
-      emit('decide_winner_error', room=game['player2']['address'])
+      emit('pay_winner_error', room=game['player1']['address'])
+      emit('pay_winner_error', room=game['player2']['address'])
     
     # GAME OVER, man!
     game['game_over'] = True
