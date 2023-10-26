@@ -9,6 +9,7 @@ import math
 import queue
 import binascii
 import requests
+import time
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -68,13 +69,12 @@ args = parser.parse_args()
 load_dotenv(args.env)
 HTTP_PROVIDER = os.getenv("HTTP_PROVIDER")
 CONTRACT_OWNER_PRIVATE_KEY = os.getenv("CONTRACT_OWNER_PRIVATE_KEY")
-logger.info(f"Contract owner private key: {CONTRACT_OWNER_PRIVATE_KEY}")
 RPS_CONTRACT_ADDRESS = os.getenv("RPS_CONTRACT_ADDRESS")
 logger.info(f"RPS contract factory address: {RPS_CONTRACT_ADDRESS}")
 KEYFILE = os.getenv("KEYFILE")
-logger.info(f"Keyfile: {KEYFILE}")
 CERTFILE = os.getenv("CERTFILE")
-logger.info(f"Certfile: {CERTFILE}")
+COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY")
+GAS_ORACLE_API_KEY = os.getenv("GAS_ORACLE_API_KEY")
 
 # Connection
 web3 = Web3(Web3.HTTPProvider(HTTP_PROVIDER))
@@ -98,13 +98,38 @@ players = {}
 
 rps_contract_factory_abi = None
 rps_contract_abi = None
-gas_limit = 5000000
+
+def get_gas_tracker():
+  url = "https://api.etherscan.io/api"
+  payload = {
+    'module': 'gastracker',
+    'action': 'gasoracle',
+    'apikey': GAS_ORACLE_API_KEY
+  }
+
+  for _ in range(13):
+    try:
+      response = requests.get(url, params=payload)
+      return response.json()
+    except (requests.exceptions.RequestException, KeyError):
+      time.sleep(8)
+
+    raise Exception("Failed to fetch gas price after several attempts")
 
 def get_eth_price():
-  url = "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd"
-  response = requests.get(url)
-  data = response.json()
-  return data['ethereum']['usd']
+  url = f"https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd&x_cg_api_key={COINGECKO_API_KEY}"
+
+  for _ in range(13):  # Try up to 10 times
+    try:
+      response = requests.get(url)
+      response.raise_for_status()  # Raise an exception if the request was unsuccessful
+      data = response.json()
+      return data['ethereum']['usd']
+    except (requests.exceptions.RequestException, KeyError):
+      time.sleep(8)  # Wait for 5 seconds before trying again
+
+    # If we've gotten to this point, all the retry attempts have failed
+    raise Exception("Failed to fetch Ethereum price after several attempts")
 
 def usd_to_eth(usd):
   eth_price = get_eth_price()
@@ -249,12 +274,17 @@ def refund_wager(game, payee):
   tx_hash = None
   rps_txn = None
 
-  # Set Gas Price
-  gas_price = web3.eth.gas_price  # Fetch the current gas price
-  arbiter_checksum_address = web3.to_checksum_address(contract_owner_account.address)
+  gas_tracker = get_gas_tracker()
+
+  gas_price = int(gas_tracker['result']['FastGasPrice'])
+  logger.info(f"Gas price for payWinnner: {gas_price}")
+  base_fee_per_gas = int(gas_tracker['result']['SafeGasPrice'])
+  logger.info(f"Base fee per gas: {base_fee_per_gas}")
+
+  contract_owner_checksum_address = web3.to_checksum_address(contract_owner_account.address)
 
   # Sign transaction using the private key of the arbiter account
-  nonce = web3.eth.get_transaction_count(arbiter_checksum_address)
+  nonce = web3.eth.get_transaction_count(contract_owner_checksum_address)
 
   if 'ganache' in args.env:
     # running on a ganache test network
@@ -271,11 +301,33 @@ def refund_wager(game, payee):
   refund_in_wei = web3.to_wei(refund_in_ether, 'ether')
   logger.info(f"Refund in wei: {refund_in_wei}")
 
-  rps_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee['address']), refund_in_wei).build_transaction({
-    'from': arbiter_checksum_address,
+  gas_estimate_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee['address']), 
+                                                        refund_in_wei,
+                                                        0,
+                                                        game['id']
+    ).build_transaction({
+    'from': contract_owner_checksum_address,
     'nonce': nonce,
-    'gas': gas_limit,
-    'gasPrice': math.ceil(gas_price * 1.05)
+    'maxFeePerGas': web3.to_wei(base_fee_per_gas, 'gwei') * math.ceil(1.05),
+    'maxPriorityFeePerGas': web3.eth.gas_price * math.ceil(1.05)
+  })
+
+  gas_estimate = web3.eth.estimate_gas(gas_estimate_txn)
+  logger.info(f"Gas estimate for refund wager txn: {gas_estimate}")
+
+  fee_estimate = gas_estimate * gas_price
+  logger.info(f"Gas fee estimate for payWinner txn: {fee_estimate}")
+  fee_markup = fee_estimate * math.ceil(1.13)
+  logger.info(f"Fee markup: {fee_markup}")
+
+  rps_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee['address']), 
+                                                        refund_in_wei,
+                                                        0,
+                                                        game['id']).build_transaction({
+    'from': contract_owner_checksum_address,
+    'nonce': nonce,
+    'maxFeePerGas': web3.to_wei(base_fee_per_gas, 'gwei') * math.ceil(1.05),
+    'maxPriorityFeePerGas': web3.eth.gas_price * math.ceil(1.05)
   })
 
   signed = contract_owner_account.sign_transaction(rps_txn)
@@ -615,10 +667,10 @@ def handle_choice(data):
     contract_owner_account = Account.from_key(CONTRACT_OWNER_PRIVATE_KEY)
     logger.info(f"Contract owner account address: {contract_owner_account.address}")
 
-    player_1_stake_ether = usd_to_eth(float(game['player1']['wager'].replace('$', '')))
-    logger.info(f"Player 1 stake in ether: {player_1_stake_ether}")
-    player_1_stake_wei = web3.to_wei(player_1_stake_ether, 'ether')
-    logger.info(f"Player 1 stake in wei: {player_1_stake_wei}")
+    player_1_stake_in_ether = usd_to_eth(float(game['player1']['wager'].replace('$', '')))
+    logger.info(f"Player 1 stake in ether: {player_1_stake_in_ether}")
+    player_1_stake_in_wei = web3.to_wei(player_1_stake_in_ether, 'ether')
+    logger.info(f"Player 1 stake in wei: {player_1_stake_in_wei}")
 
     player_2_stake_in_ether = usd_to_eth(float(game['player2']['wager'].replace('$', '')))
     logger.info(f"Player 2 stake in ether: {player_2_stake_in_ether}")
@@ -636,12 +688,34 @@ def handle_choice(data):
     rps_contract = web3.eth.contract(address=rps_contract_address, abi=rps_contract_abi)
     rps_txn = None
     
-    # Set Gas Price
-    gas_price = web3.eth.gas_price  # Fetch the current gas price
+    gas_tracker = get_gas_tracker()
+
+    gas_price = int(gas_tracker['result']['FastGasPrice'])
+    logger.info(f"Gas price for payWinnner: {gas_price}")
+    base_fee_per_gas = int(gas_tracker['result']['SafeGasPrice'])
+    logger.info(f"Base fee per gas: {base_fee_per_gas}")
+
     contract_owner_checksum_address = web3.to_checksum_address(contract_owner_account.address)
 
     # Sign transaction using the private key of the contract owner account
     nonce = web3.eth.get_transaction_count(contract_owner_checksum_address)  # Get the nonce
+
+    gas_estimate_txn = rps_contract.functions.payWinner(web3.to_checksum_address(winner_address), 
+                                                      player_1_stake_in_wei,
+                                                      player_2_stake_in_wei,
+                                                      0, 
+                                                      game['id']).build_transaction({
+      'from': contract_owner_checksum_address,
+      'nonce': nonce,
+      'maxFeePerGas': web3.to_wei(base_fee_per_gas, 'gwei') * math.ceil(1.05),
+      'maxPriorityFeePerGas': web3.eth.gas_price * math.ceil(1.05)
+    })
+
+    gas_estimate = web3.eth.estimate_gas(gas_estimate_txn)
+    logger.info(f"Gas estimate for payWinner txn: {gas_estimate}")
+
+    fee_estimate = gas_estimate * gas_price
+    logger.info(f"Gas fee estimate for payWinner txn: {fee_estimate}")
 
     if winner is None and loser is None:
       logger.info('Game is a draw.')
@@ -652,11 +726,19 @@ def handle_choice(data):
       player_1_address = game['player1']['address']
       player_2_address = game['player2']['address']
 
-      rps_txn = rps_contract.functions.payDraw(web3.to_checksum_address(player_1_address), web3.to_checksum_address(player_2_address), player_1_stake_wei, player_2_stake_in_wei).build_transaction({
+      fee_markup = fee_estimate * math.ceil(1.15)
+      logger.info(f"Fee markup: {fee_markup}")
+      
+      rps_txn = rps_contract.functions.payDraw(web3.to_checksum_address(player_1_address), 
+                                           web3.to_checksum_address(player_2_address), 
+                                           player_1_stake_in_wei, 
+                                           player_2_stake_in_wei,
+                                           fee_markup,
+                                           game['id']).build_transaction({
         'from': contract_owner_checksum_address,
         'nonce': nonce,
-        'gas': gas_limit,  # You may need to change the gas limit
-        'gasPrice': math.ceil(gas_price * 1.05)
+        'maxFeePerGas': web3.to_wei(base_fee_per_gas, 'gwei') * math.ceil(1.05),
+        'maxPriorityFeePerGas': web3.eth.gas_price * math.ceil(1.05)
       })
     else:
       game['winner'] = winner
@@ -672,11 +754,19 @@ def handle_choice(data):
       winner_address = winner['address']
       logger.info(f"Winner account address: {winner_address}")
 
-      rps_txn = rps_contract.functions.payWinner(web3.to_checksum_address(winner_address), player_1_stake_wei, player_2_stake_in_wei).build_transaction({
+      fee_markup = fee_estimate * math.ceil(1.5)
+      logger.info(f"Fee markup: {fee_markup}")
+
+      rps_txn = rps_contract.functions.payWinner(
+          web3.to_checksum_address(winner_address), 
+          player_1_stake_in_wei, 
+          player_2_stake_in_wei, 
+          web3.to_wei(fee_markup, 'gwei'), 
+          game['id']).build_transaction({
         'from': contract_owner_checksum_address,
         'nonce': nonce,
-        'gas': gas_limit,  # You may need to change the gas limit
-        'gasPrice': math.ceil(gas_price * 1.05)
+        'maxFeePerGas': web3.to_wei(base_fee_per_gas, 'gwei') * math.ceil(1.05),
+        'maxPriorityFeePerGas': web3.eth.gas_price * math.ceil(1.05)
       })
 
     tx_hash = None
