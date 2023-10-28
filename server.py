@@ -1,3 +1,6 @@
+# from gevent import monkey
+# monkey.patch_all()
+
 import datetime
 import sys
 import logging
@@ -17,8 +20,6 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.oauth2 import service_account
 from googleapiclient.http import MediaIoBaseDownload
-from gevent import monkey
-# monkey.patch_all()
 
 from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, join_room, emit, leave_room
