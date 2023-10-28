@@ -1,5 +1,5 @@
-# from gevent import monkey
-# monkey.patch_all()
+from gevent import monkey
+monkey.patch_all()
 
 import datetime
 import sys
@@ -304,9 +304,12 @@ def refund_wager(game, payee):
   refund_in_wei = web3.to_wei(refund_in_ether, 'ether')
   logger.info(f"Refund in wei: {refund_in_wei}")
 
-  gas_estimate_txn = rps_contract.functions.refundWager(contract_owner_checksum_address, 
+  refund_fee = refund_in_ether * 0.02
+  logger.info(f"Refund fee: {refund_fee}")
+
+  gas_estimate_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee['address']),
                                                         refund_in_wei,
-                                                        0,
+                                                        web3.to_wei(refund_fee, 'ether'),
                                                         game['id']
     ).build_transaction({
     'from': contract_owner_checksum_address,
@@ -318,9 +321,6 @@ def refund_wager(game, payee):
 
   gas_fee_estimate = gas_estimate * gas_price
   logger.info(f"Gas fee estimate for refund txn: {gas_fee_estimate}")
-
-  refund_fee = refund_in_ether * 0.02
-  logger.info(f"Refund fee: {refund_fee}")
 
   rps_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee['address']), 
                                                         refund_in_wei,
@@ -722,11 +722,16 @@ def handle_choice(data):
       player_1_address = game['player1']['address']
       player_2_address = game['player2']['address']      
 
-      gas_estimate_txn = rps_contract.functions.payDraw(contract_owner_checksum_address,
-                                                        contract_owner_checksum_address,
+      p1_draw_fee = player_1_stake_in_ether * 0.03
+      p2_draw_fee = player_2_stake_in_ether * 0.03
+      draw_game_fee = p1_draw_fee + p2_draw_fee
+      logger.info(f"Draw game fee: {draw_game_fee}")
+
+      gas_estimate_txn = rps_contract.functions.payDraw(web3.to_checksum_address(player_1_address),
+                                                        web3.to_checksum_address(player_2_address),
                                                         player_1_stake_in_wei,
                                                         player_2_stake_in_wei,
-                                                        0, 
+                                                        web3.to_wei(draw_game_fee, 'ether'), 
                                                         game['id']).build_transaction({
         'from': contract_owner_checksum_address,
         'nonce': nonce
@@ -738,10 +743,6 @@ def handle_choice(data):
       gas_fee_estimate = gas_estimate * gas_price
       logger.info(f"Gas fee estimate for payWinner txn: {gas_fee_estimate}")
 
-      p1_draw_fee = player_1_stake_in_wei * 0.03
-      p2_draw_fee = player_2_stake_in_wei * 0.03
-      draw_game_fee = p1_draw_fee + p2_draw_fee
-      logger.info(f"Draw game fee: {draw_game_fee}")
       
       rps_txn = rps_contract.functions.payDraw(web3.to_checksum_address(player_1_address), 
                                            web3.to_checksum_address(player_2_address), 
@@ -768,10 +769,15 @@ def handle_choice(data):
       winner_address = winner['address']
       logger.info(f"Winner account address: {winner_address}")
 
-      gas_estimate_txn = rps_contract.functions.payWinner(contract_owner_checksum_address, 
+      p1_win_game_fee = player_1_stake_in_ether * 0.1
+      p2_win_game_fee = player_2_stake_in_ether * 0.1
+      win_game_fee = p1_win_game_fee + p2_win_game_fee
+      logger.info(f"Win game fee: {win_game_fee}")
+
+      gas_estimate_txn = rps_contract.functions.payWinner(web3.to_checksum_address(winner_address), 
                                                       player_1_stake_in_wei,
                                                       player_2_stake_in_wei,
-                                                      0, 
+                                                      web3.to_wei(win_game_fee, 'ether'), 
                                                       game['id']).build_transaction({
         'from': contract_owner_checksum_address,
         'nonce': nonce
@@ -783,10 +789,6 @@ def handle_choice(data):
       gas_fee_estimate = gas_estimate * gas_price
       # logger.info(f"Gas fee estimate for payWinner txn: {gas_fee_estimate}")
 
-      p1_win_game_fee = player_1_stake_in_wei * 0.1
-      p2_win_game_fee = player_2_stake_in_wei * 0.1
-      win_game_fee = p1_win_game_fee + p2_win_game_fee
-      logger.info(f"Win game fee: {win_game_fee}")
 
       rps_txn = rps_contract.functions.payWinner(
           web3.to_checksum_address(winner_address), 
@@ -817,7 +819,6 @@ def handle_choice(data):
       signed = contract_owner_account.sign_transaction(rps_txn)
       tx_hash = web3.eth.send_raw_transaction(signed.rawTransaction)
       
-      # log differently in case of draw
       if winner is None and loser is None:
         txn_logger.critical(f"Game resulted in a draw transaction hash: {web3.to_hex(tx_hash)}, game_id: {game['id']}, address: {contract_owner_account.address}, player1: {game['player1']['address']}, player2: {game['player2']['address']}")
       else:
@@ -842,6 +843,8 @@ def handle_choice(data):
     
     # GAME OVER, man!
     game['game_over'] = True
+
+    logger.info(f"Final game state: {game}")
 
     etherscan_link = None
     # send player a txn link to etherscan
