@@ -689,13 +689,11 @@ def handle_choice(data):
     player_2_stake_in_wei = web3.to_wei(player_2_stake_in_ether, 'ether')
     logger.info(f"Player 2 stake in wei: {player_2_stake_in_wei}")
         
-    # call payWinner contract function here
     logger.info('Calling payWinner contract function')
     
     rps_contract_address = web3.to_checksum_address(RPS_CONTRACT_ADDRESS)
     logger.info(f"Contract address: {rps_contract_address}")
 
-    # interact with the rps contract
     global rps_contract_abi
     rps_contract = web3.eth.contract(address=rps_contract_address, abi=rps_contract_abi)
     rps_txn = None
