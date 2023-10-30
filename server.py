@@ -591,14 +591,15 @@ def handle_submit_wager(data):
     return
   # assign the wager to the correct player  
   # if player1 offered the wager, emit an event to player2 to inform them that player1 offered a wager
-  if address == game['player1']['address']:
+  if address == game['player1']['address'] and game['player1']['wager_offered'] == False:
     game['player1']['wager'] = wager
     game['player1']['wager_offered'] = True
     emit('wager_offered', {'wager': wager}, room=game['player2']['address'])
   else:
-    game['player2']['wager'] = wager
-    game['player2']['wager_offered'] = True
-    emit('wager_offered', {'wager': wager}, room=game['player1']['address'])
+    if game['player2']['wager_offered'] == False:
+      game['player2']['wager'] = wager
+      game['player2']['wager_offered'] = True
+      emit('wager_offered', {'wager': wager}, room=game['player1']['address'])
 
 @socketio.on('accept_wager')
 def handle_accept_wager(data):
