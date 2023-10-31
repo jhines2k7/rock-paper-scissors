@@ -30,6 +30,7 @@ from eth_account import Account
 from dotenv import load_dotenv
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
+from azure.cosmos import CosmosClient, PartitionKey
 
 logging.basicConfig(
   stream=sys.stderr,
@@ -75,8 +76,12 @@ RPS_CONTRACT_ADDRESS = os.getenv("RPS_CONTRACT_ADDRESS")
 logger.info(f"RPS contract address: {RPS_CONTRACT_ADDRESS}")
 KEYFILE = os.getenv("KEYFILE")
 CERTFILE = os.getenv("CERTFILE")
-COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY")
+COINGECKO_API = os.getenv("COINGECKO_API")
 GAS_ORACLE_API_KEY = os.getenv("GAS_ORACLE_API_KEY")
+COSMOS_ENDPOINT = os.getenv("COSMOS_ENDPOINT")
+COSMOS_KEY = os.getenv("COSMOS_KEY")
+COSMOS_DB_NAME = os.getenv("COSMOS_DB_NAME")
+COSMOS_CONTAINER_NAME = os.getenv("COSMOS_CONTAINER_NAME")
 
 # Connection
 web3 = Web3(Web3.HTTPProvider(HTTP_PROVIDER))
@@ -94,7 +99,7 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv("SECRET_KEY")
 CORS(app)
 socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins='*')
-games = {}
+# games = {}
 player_queue = queue.Queue()
 players = {}
 
@@ -102,8 +107,20 @@ ethereum_prices = []
 
 rps_contract_factory_abi = None
 rps_contract_abi = None
+cosmos_db = None
 
-def get_gas_tracker():
+def create_comsos_container():
+  client = CosmosClient(url=COSMOS_ENDPOINT, credential=COSMOS_KEY)
+  database = client.create_database_if_not_exists(id=COSMOS_DB_NAME)
+  key_path = PartitionKey(path="/contract_address")
+
+  return database.create_container_if_not_exists(
+    id=COSMOS_CONTAINER_NAME,
+    partition_key=key_path,
+    offer_throughput=400
+  )
+
+def get_gas_oracle():
   url = "https://api.etherscan.io/api"
   payload = {
     'module': 'gastracker',
@@ -122,11 +139,9 @@ def get_gas_tracker():
     raise Exception("Failed to fetch gas price after several attempts")
 
 def get_eth_price():
-  url = f"https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd&x_cg_api_key={COINGECKO_API_KEY}"
-
   for _ in range(5):
     try:
-      response = requests.get(url)
+      response = requests.get(COINGECKO_API)
       response.raise_for_status()  # Raise an exception if the request was unsuccessful
       data = response.json()
       return data['ethereum']['usd']
@@ -137,7 +152,7 @@ def get_eth_price():
     raise Exception("Failed to fetch Ethereum price after several attempts")
 
 def usd_to_eth(usd):
-  eth_price = ethereum_prices[-1]
+  eth_price = get_eth_price()
   return usd / eth_price
 
 def convert_bytes_to_hex(bytes_value):
@@ -279,10 +294,12 @@ def refund_wager(game, payee):
   tx_hash = None
   rps_txn = None
 
-  gas_tracker = get_gas_tracker()
+  gas_oracle = get_gas_oracle()
 
-  gas_price = int(gas_tracker['result']['FastGasPrice'])
+  gas_price = int(gas_oracle['result']['FastGasPrice'])
   logger.info(f"Gas price for payWinnner: {gas_price}")
+
+  last_block = int(gas_oracle['result']['LastBlock'])
 
   contract_owner_checksum_address = web3.to_checksum_address(contract_owner_account.address)
 
@@ -322,13 +339,15 @@ def refund_wager(game, payee):
   gas_fee_estimate = gas_estimate * gas_price
   logger.info(f"Gas fee estimate for refund txn: {gas_fee_estimate}")
 
+  max_fee_per_gas_estimate = last_block * gas_price
+
   rps_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee['address']), 
                                                         refund_in_wei,
                                                         web3.to_wei(refund_fee, 'ether'),
                                                         game['id']).build_transaction({
     'from': contract_owner_checksum_address,
     'nonce': nonce,
-    'maxFeePerGas': gas_fee_estimate,
+    'maxFeePerGas': max_fee_per_gas_estimate,
     'maxPriorityFeePerGas': gas_fee_estimate
   })
 
@@ -340,7 +359,7 @@ def refund_wager(game, payee):
   # Get the transaction receipt for the decide winner transaction
   tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
   print(f'Transaction receipt after refundWager was called: {tx_receipt}')
-  game['transactions'].append(tx_receipt)
+  game['transactions'].append(web3.to_hex(tx_hash))
 
   return tx_hash
 
@@ -393,7 +412,8 @@ def handle_heartbeat(data):
 @socketio.on('rpc_error')
 def handle_rpc_error(data):
   logger.error('RPC error: %s', data)
-  game = games[data['game_id']]
+
+  game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
 
   if game['game_over']:    
     return
@@ -401,11 +421,14 @@ def handle_rpc_error(data):
   game['rpc_error'] = True
   game['game_over'] = True
 
+  # cosmos_db.upsert_item(body=game)
+  cosmos_db.replace_item(item=game['id'], body=game)
+
 @socketio.on('insufficient_funds')  
 def handle_insufficient_funds(data):
   logger.info('Player: %s had insufficient funds to join the contract.', data['address'])
   
-  game = games[data['game_id']]
+  game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
 
   if game['game_over']:    
     return
@@ -413,9 +436,11 @@ def handle_insufficient_funds(data):
   game['insufficient_funds'] = True
   game['game_over'] = True
 
+  cosmos_db.replace_item(item=game['id'], body=game)
+
 @socketio.on('contract_rejected')
 def handle_contract_rejected(data):
-  game = games[data['game_id']]
+  game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
 
   if game['game_over']:
     return
@@ -433,10 +458,13 @@ def handle_contract_rejected(data):
     if game['player1']['contract_accepted']:
       payee=game['player1']
 
-  game['game_over'] = True
-
   # refund the player that accepted the contract
   tx_hash = refund_wager(game, payee=payee)
+  game['game_over'] = True
+  game['transactions'].append(web3.to_hex(tx_hash))
+
+  cosmos_db.replace_item(item=game['id'], body=game)
+
   # send player a txn link to etherscan
   etherscan_link = None
   if 'sepolia' in args.env or 'ganache' in args.env:
@@ -447,7 +475,8 @@ def handle_contract_rejected(data):
   
 @socketio.on('pay_stake_confirmation')
 def handle_join_contract_confirmation(data):
-  game = games[data['game_id']]
+  # game = games[data['game_id']]
+  game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
   logger.info('join contract confirmation number: %s', data)
 
   # which player accepted the contract
@@ -469,6 +498,8 @@ def handle_join_contract_confirmation(data):
       payee = game['player2']
 
     tx_hash = refund_wager(game, payee=payee)
+    game['transactions'].append(web3.to_hex(tx_hash))
+
     # send player a txn link to etherscan
     etherscan_link = None
     if 'sepolia' in args.env or 'ganache' in args.env:
@@ -485,12 +516,19 @@ def handle_join_contract_confirmation(data):
     else:
       logger.info('One player decided not to join the contract. Notifying the opposing player and issuing a refund.')
       emit('player_stake_refunded', { 'etherscan_link': etherscan_link, 'reason': 'contract_rejected' }, room=payee['address'])
+  
+  # cosmos_db.upsert_item(body=game)
+  cosmos_db.replace_item(item=game['id'], body=game)
 
 @socketio.on('pay_stake_hash')
 def handle_join_contract_hash(data):
   logger.info('join contract transaction hash received: %s', data)
-  game = games[data['game_id']]
+  # game = games[data['game_id']]
+  game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
   game['transactions'].append(data['transaction_hash'])
+  
+  # cosmos_db.upsert_item(body=game)
+  cosmos_db.replace_item(item=game['id'], body=game)
   
   txn_logger.critical(f"Join contract transaction hash: {data['transaction_hash']}, game_id: {game['id']}, address: {data['address']}")
   
@@ -498,7 +536,8 @@ def handle_join_contract_hash(data):
 
 @socketio.on('pay_stake_receipt')
 def handle_join_contract_receipt(data):
-  game = games[data['game_id']]
+  # game = games[data['game_id']]
+  game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
   logger.info('join contract transaction receipt received: %s', data)
   logger.info(f"Current game state in on join_contract_receipt: {game}")
 
@@ -519,10 +558,8 @@ def handle_connect():
   if player_queue.qsize() >= 2:
     join_game()
     logger.info('Game started. Number of players in queue: {}'.format(player_queue.qsize()))
-    logger.info('Games: {}'.format(games))
   else:
     logger.info('Waiting for players to join. Number of players in queue: {}'.format(player_queue.qsize()))
-    logger.info('Games: {}'.format(games))
 
 def join_game():
   # try to remove the first two players from the queue
@@ -549,15 +586,21 @@ def join_game():
       return
   
   # determine if either player has already joined a game
-  for game in games.values():
-    if game['player1']['address'] == player1['address'] or \
-      game['player2']['address'] == player1['address']:
-      logger.info('Player {} has already joined a game.'.format(player1['address']))
-      return
-    elif game['player1']['address'] == player2['address'] or \
-      game['player2']['address'] == player2['address']:
-      logger.info('Player {} has already joined a game.'.format(player2['address']))
-      return
+  QUERY = "SELECT * FROM games g WHERE g.player1.address = @address AND g.game_over = 'false'"
+  params = [dict(name="@address", value=player1['address'])]
+  results = cosmos_db.query_items(query=QUERY, parameters=params, enable_cross_partition_query=True)
+  games = [game for game in results]
+  if len(games) > 0:
+    logger.info('Player {} has already joined a game.'.format(player1['address']))
+    return
+
+  QUERY = "SELECT * FROM games g WHERE g.player2.address = @address AND g.game_over = 'false'"
+  params = [dict(name="@address", value=player2['address'])]
+  results = cosmos_db.query_items(query=QUERY, parameters=params, enable_cross_partition_query=True)
+  games = [game for game in results]
+  if len(games) > 0:
+    logger.info('Player {} has already joined a game.'.format(player2['address']))
+    return
   
   # create a new game
   game = get_new_game()
@@ -567,9 +610,9 @@ def join_game():
   # set the player1 and player2
   game['player1'] = player1
   game['player2'] = player2
-  game['address'] = RPS_CONTRACT_ADDRESS
-  # add the game to the games dictionary
-  games[game['id']] = game
+  game['contract_address'] = RPS_CONTRACT_ADDRESS
+
+  cosmos_db.create_item(body=game)
 
   # emit an event to both players to inform them that the game has started
   emit('game_started', {'game_id': str(game['id'])}, room=game['player1']['address'])
@@ -581,8 +624,7 @@ def handle_submit_wager(data):
   logger.info('Received wager from address %s', address)
   wager = data['wager']
 
-  # get the game session from the games dictionary
-  game = games[data['game_id']]
+  game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
   # exit early if the game is over
   if game['game_over']:
     logger.info('Game is over.')
@@ -600,12 +642,14 @@ def handle_submit_wager(data):
       game['player2']['wager'] = wager
       game['player2']['wager_offered'] = True
       emit('wager_offered', {'wager': wager}, room=game['player1']['address'])
+  
+  cosmos_db.replace_item(item=game['id'], body=game)
 
 @socketio.on('accept_wager')
 def handle_accept_wager(data):
   address = data['address']
-  # get the game session from the games dictionary
-  game = games[data['game_id']]
+
+  game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
   # exit early if the game is over
   if game['game_over']:
     logger.info('Game is over.')
@@ -636,11 +680,13 @@ def handle_accept_wager(data):
       'opponent_wager': game['player1']['wager'],
     }, room=game['player2']['address'])
 
+  cosmos_db.replace_item(item=game['id'], body=game)
+
 @socketio.on('decline_wager')
 def handle_decline_wager(data):
   address = data['address']
-  # get the game session from the games dictionary
-  game = games[data['game_id']]
+
+  game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
   # exit early if the game is over
   if game['game_over']:
     logger.info('Game is over.')
@@ -656,11 +702,15 @@ def handle_decline_wager(data):
     game['player2']['wager_accepted'] = False
     # emit wager declined event to the opposing player
     emit('wager_declined', {'game_id': data['game_id']}, room=game['player1']['address'])
+  
+  # cosmos_db.upsert_item(body=game)
+  cosmos_db.replace_item(item=game['id'], body=game)
 
 @socketio.on('choice')
 def handle_choice(data):
   address = data['address']
-  game = games[data['game_id']]
+
+  game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
   # exit early if the game is over
   if game['game_over']:
     logger.info('Game is over.')
@@ -672,6 +722,8 @@ def handle_choice(data):
     game['player1']['choice'] = data['choice']
   else:
     game['player2']['choice'] = data['choice']
+
+  cosmos_db.replace_item(item=game['id'], body=game)
 
   logger.info('Player {} chose: {}'.format(data['address'], data['choice']))
 
@@ -698,10 +750,12 @@ def handle_choice(data):
     rps_contract = web3.eth.contract(address=rps_contract_address, abi=rps_contract_abi)
     rps_txn = None
     
-    gas_tracker = get_gas_tracker()
+    gas_oracle = get_gas_oracle()
 
-    gas_price = int(gas_tracker['result']['FastGasPrice'])
+    gas_price = int(gas_oracle['result']['FastGasPrice'])
     logger.info(f"Gas price for payWinnner: {gas_price}")
+
+    last_block = int(gas_oracle['result']['LastBlock'])
 
     contract_owner_account = Account.from_key(CONTRACT_OWNER_PRIVATE_KEY)
     logger.info(f"Contract owner account address: {contract_owner_account.address}")
@@ -717,6 +771,8 @@ def handle_choice(data):
       # set the game winner and loser
       game['winner'] = None
       game['loser'] = None
+  
+      cosmos_db.replace_item(item=game['id'], body=game)
 
       player_1_address = game['player1']['address']
       player_2_address = game['player2']['address']      
@@ -742,6 +798,7 @@ def handle_choice(data):
       gas_fee_estimate = gas_estimate * gas_price
       logger.info(f"Gas fee estimate for payWinner txn: {gas_fee_estimate}")
 
+      max_fee_per_gas_estimate = last_block * gas_price
       
       rps_txn = rps_contract.functions.payDraw(web3.to_checksum_address(player_1_address), 
                                            web3.to_checksum_address(player_2_address), 
@@ -751,12 +808,13 @@ def handle_choice(data):
                                            game['id']).build_transaction({
         'from': contract_owner_checksum_address,
         'nonce': nonce,
-        'maxFeePerGas': gas_fee_estimate,
+        'maxFeePerGas': max_fee_per_gas_estimate,
         'maxPriorityFeePerGas': gas_fee_estimate
       })
     else:
       game['winner'] = winner
       game['loser'] = loser
+
       logger.info('Winning player: {}'.format(winner))
       logger.info('Losing player: {}'.format(loser))
       # assign winnings to the winning player
@@ -764,6 +822,9 @@ def handle_choice(data):
       game['winner']['winnings'] = loser['wager']
       # assign losses to the losing player
       game['loser']['losses'] = loser['wager']
+
+      # cosmos_db.upsert_item(body=game)
+      cosmos_db.replace_item(item=game['id'], body=game)
 
       winner_address = winner['address']
       logger.info(f"Winner account address: {winner_address}")
@@ -786,8 +847,9 @@ def handle_choice(data):
       logger.info(f"Gas estimate for payWinner txn: {gas_estimate}")
 
       gas_fee_estimate = gas_estimate * gas_price
-      # logger.info(f"Gas fee estimate for payWinner txn: {gas_fee_estimate}")
+      logger.info(f"Gas fee estimate for payWinner txn: {gas_fee_estimate}")
 
+      max_fee_per_gas_estimate = last_block * gas_price
 
       rps_txn = rps_contract.functions.payWinner(
           web3.to_checksum_address(winner_address), 
@@ -797,7 +859,7 @@ def handle_choice(data):
           game['id']).build_transaction({
         'from': contract_owner_checksum_address,
         'nonce': nonce,
-        'maxFeePerGas': gas_fee_estimate,
+        'maxFeePerGas': max_fee_per_gas_estimate,
         'maxPriorityFeePerGas': gas_fee_estimate
       })
 
@@ -828,7 +890,7 @@ def handle_choice(data):
       # Get the transaction receipt for the decide winner transaction
       tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
       logger.info(f'Transaction receipt after payWinner was called: {tx_receipt}')
-      game['transactions'].append(tx_receipt)
+      game['transactions'].append(web3.to_hex(tx_hash))
     except ValueError as e:
       logger.error(f"A ValueError occurred: {str(e)}")
       # notify both players there was an error deciding the winner
@@ -843,7 +905,10 @@ def handle_choice(data):
     # GAME OVER, man!
     game['game_over'] = True
 
+    logger.info(f"Current game state in on choice after payign winner: {game}")
     logger.info(f"Final game state: {game}")
+
+    cosmos_db.replace_item(item=game['id'], body=game)
 
     etherscan_link = None
     # send player a txn link to etherscan
@@ -882,21 +947,23 @@ def handle_disconnect():
   # the `request` context still contains the disconnection information
   address = request.args.get('address')
   logger.info('Player with address {} disconnected.'.format(address))
-  # find the player in the games dictionary
-  for game in games.values():
+
+  QUERY = "SELECT * FROM games g WHERE g.player1.address = @address OR g.player2.address = @address AND g.player1.game_id = g.player2.game_id AND g.game_over = 'false'"
+  params = [dict(name="@address", value=address)]
+  results = cosmos_db.query_items(query=QUERY, parameters=params, enable_cross_partition_query=True)
+  games = [game for game in results]
+
+  for game in games:
+    game['game_over'] = True
+    cosmos_db.replace_item(item=game['id'], body=game)
+
     if game['player1']['address'] == address:
       logger.info('Player1 {} disconnected from game {}.'.format(address, game['id']))
-      # emit an event to the other player to inform them that the player disconnected
       emit('opponent_disconnected', room=game['player2']['address'])
-      # remove the game from the games dictionary
-      del games[game['id']]
       break
     elif game['player2']['address'] == address:
       logger.info('Player1 {} disconnected from game {}.'.format(address, game['id']))
-      # emit an event to the other player to inform them that the player disconnected
       emit('opponent_disconnected', room=game['player1']['address'])
-      # remove the game from the games dictionary
-      del games[game['id']]
       break
 
 def get_eth_prices():
@@ -917,9 +984,10 @@ if __name__ == '__main__':
   
   logger.info('Downloading contract ABIs...')
   download_contract_abi()
+  cosmos_db = create_comsos_container()
 
-  thread = threading.Thread(target=get_eth_prices)
-  thread.start()
+  # thread = threading.Thread(target=get_eth_prices)
+  # thread.start()
 
   logger.info('Starting server...')
 
