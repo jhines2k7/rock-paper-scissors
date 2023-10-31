@@ -282,6 +282,7 @@ def refund_wager(game, payee):
 
   # call refundWager contract function here
   logger.info('Calling refundWager contract function')
+  logger.info(f"Payee: {payee}")
   
   logger.info(f"Payee account address: {payee['address']}")
   rps_contract_address = web3.to_checksum_address(RPS_CONTRACT_ADDRESS)
@@ -480,7 +481,6 @@ def handle_contract_rejected(data):
 
   logging.info(f"Player {data['address']} rejected the contract.")
 
-  payee = None  
   # determine which player rejected the contract
   if game['player1']['address'] == data['address']:
     game['player1']['contract_rejected'] = True
