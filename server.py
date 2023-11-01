@@ -552,10 +552,10 @@ def handle_contract_rejected(data):
     # refund the player that accepted the contract
     tx_hash = refund_wager(game, payee=payee)
     
-    if game['player1']['address'] == data['address']:
-      game['player1']['wager_refunded'] = True
-    else:
+    if game['player1']['address'] == data['address']: # this means player one rejected the contract and player 2 was refunded
       game['player2']['wager_refunded'] = True
+    else:
+      game['player1']['wager_refunded'] = True
       
     cosmos_db.replace_item(item=game['id'], body=game)
 
@@ -1052,22 +1052,21 @@ def handle_disconnect():
   logger.info('Player with address {} disconnected.'.format(address))
 
   QUERY = "SELECT * FROM games g WHERE g.game_over = false"
+  # params = [dict(name="@address", value=address)]
   results = cosmos_db.query_items(query=QUERY, enable_cross_partition_query=True)
   games = [game for game in results]
 
   for game in games:
     game['game_over'] = True
     cosmos_db.replace_item(item=game['id'], body=game)
-    # do we need to issue a refund?
     if game['player1']['address'] == address:
       logger.info('Player1 {} disconnected from game {}.'.format(address, game['id']))
-      game['player1']['player_disconnected'] = True
       # do we need to issue a refund?
       if game['player2']['contract_accepted'] and not game['player2']['wager_refunded']:
         logger.info('Player2 accepted the contract. Issuing a refund.')
         tx_hash = refund_wager(game, payee=game['player2'])
         game['transactions'].append(web3.to_hex(tx_hash))
-        game['player2']['wager_refunded'] = True
+        cosmos_db.replace_item(item=game['id'], body=game)
         # send player a txn link to etherscan
         etherscan_link = None
         if 'sepolia' in args.env or 'ganache' in args.env:
@@ -1078,12 +1077,11 @@ def handle_disconnect():
       emit('opponent_disconnected', room=game['player2']['address'])
     elif game['player2']['address'] == address:
       logger.info('Player2 {} disconnected from game {}.'.format(address, game['id']))
-      game['player2']['player_disconnected'] = True
       if game['player1']['contract_accepted'] and not game['player1']['wager_refunded']:
         logger.info('Player1 accepted the contract. Issuing a refund.')
         tx_hash = refund_wager(game, payee=game['player1'])
         game['transactions'].append(web3.to_hex(tx_hash))
-        game['player1']['wager_refunded'] = True
+        cosmos_db.replace_item(item=game['id'], body=game)
         # send player a txn link to etherscan
         etherscan_link = None
         if 'sepolia' in args.env or 'ganache' in args.env:
@@ -1092,48 +1090,6 @@ def handle_disconnect():
           etherscan_link = f"https://etherscan.io/tx/{web3.to_hex(tx_hash)}"
         emit('player_stake_refunded', { 'etherscan_link': etherscan_link }, room=game['player1']['address'])
       emit('opponent_disconnected', room=game['player1']['address'])
-    
-    cosmos_db.replace_item(item=game['id'], body=game)
-
-def global_exception_handler(type, value, traceback):
-  txn_logger.error('!!!UNCAUGHT EXCEPTION OCCURED!!!')
-  txn_logger.error(f"UNCAUGHT EXCEPTION TYPE: {type}")
-  txn_logger.error(f"UNCAUGHT EXCEPTION VALUE: {value}")
-  
-  # determine if refunds need to be issued
-  QUERY = "SELECT * FROM games g WHERE g.game_over = false"
-  results = cosmos_db.query_items(query=QUERY, enable_cross_partition_query=True)
-  games = [game for game in results]
-
-  for game in games:
-    game['game_over'] = True
-    if game['player2']['contract_accepted'] and not game['player2']['wager_refunded']:
-      logger.info('Player2 accepted the contract. Issuing a refund.')
-      tx_hash = refund_wager(game, payee=game['player2'])
-      game['transactions'].append(web3.to_hex(tx_hash))
-      game['player2']['wager_refunded'] = True
-      # send player a txn link to etherscan
-      etherscan_link = None
-      if 'sepolia' in args.env or 'ganache' in args.env:
-        etherscan_link = f"https://sepolia.etherscan.io/tx/{web3.to_hex(tx_hash)}"
-      elif 'mainnet' in args.env:
-        etherscan_link = f"https://etherscan.io/tx/{web3.to_hex(tx_hash)}"
-      emit('uncaught_exception_occured', { 'etherscan_link': etherscan_link }, room=game['player2']['address'])
-
-    if game['player1']['contract_accepted'] and not game['player1']['wager_refunded']:
-      logger.info('Player1 accepted the contract. Issuing a refund.')
-      tx_hash = refund_wager(game, payee=game['player1'])
-      game['transactions'].append(web3.to_hex(tx_hash))
-      game['player1']['wager_refunded'] = True
-      # send player a txn link to etherscan
-      etherscan_link = None
-      if 'sepolia' in args.env or 'ganache' in args.env:
-        etherscan_link = f"https://sepolia.etherscan.io/tx/{web3.to_hex(tx_hash)}"
-      elif 'mainnet' in args.env:
-        etherscan_link = f"https://etherscan.io/tx/{web3.to_hex(tx_hash)}"
-      emit('uncaught_exception_occured', { 'etherscan_link': etherscan_link }, room=game['player1']['address'])
-
-sys.excepthook = global_exception_handler
 
 def get_eth_prices():
   while True:
