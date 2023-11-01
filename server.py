@@ -433,7 +433,8 @@ def get_new_player(player_id=None):
     'contract_accepted': False,
     'contract_rejected': False,
     'rpc_error': False,
-    'wager_refunded': False
+    'wager_refunded': False,
+    'player_disconnected': False
   }
 
 @app.route('/ethereum-price', methods=['GET'])
