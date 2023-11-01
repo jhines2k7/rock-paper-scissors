@@ -417,7 +417,8 @@ def get_new_player():
     'contract_accepted': False,
     'contract_rejected': False,
     'rpc_error': False,
-    'wager_refunded': False
+    'wager_refunded': False,
+    'player_disconnected': False
   }
 
 @app.route('/ethereum-price', methods=['GET'])
@@ -1058,15 +1059,15 @@ def handle_disconnect():
 
   for game in games:
     game['game_over'] = True
-    cosmos_db.replace_item(item=game['id'], body=game)
     if game['player1']['address'] == address:
       logger.info('Player1 {} disconnected from game {}.'.format(address, game['id']))
+      game['player1']['player_disconnected'] = True
       # do we need to issue a refund?
       if game['player2']['contract_accepted'] and not game['player2']['wager_refunded']:
         logger.info('Player2 accepted the contract. Issuing a refund.')
         tx_hash = refund_wager(game, payee=game['player2'])
         game['transactions'].append(web3.to_hex(tx_hash))
-        cosmos_db.replace_item(item=game['id'], body=game)
+        game['player2']['wager_refunded'] = True
         # send player a txn link to etherscan
         etherscan_link = None
         if 'sepolia' in args.env or 'ganache' in args.env:
@@ -1077,11 +1078,12 @@ def handle_disconnect():
       emit('opponent_disconnected', room=game['player2']['address'])
     elif game['player2']['address'] == address:
       logger.info('Player2 {} disconnected from game {}.'.format(address, game['id']))
+      game['player2']['player_disconnected'] = True
       if game['player1']['contract_accepted'] and not game['player1']['wager_refunded']:
         logger.info('Player1 accepted the contract. Issuing a refund.')
         tx_hash = refund_wager(game, payee=game['player1'])
         game['transactions'].append(web3.to_hex(tx_hash))
-        cosmos_db.replace_item(item=game['id'], body=game)
+        game['player1']['wager_refunded'] = True
         # send player a txn link to etherscan
         etherscan_link = None
         if 'sepolia' in args.env or 'ganache' in args.env:
@@ -1090,6 +1092,8 @@ def handle_disconnect():
           etherscan_link = f"https://etherscan.io/tx/{web3.to_hex(tx_hash)}"
         emit('player_stake_refunded', { 'etherscan_link': etherscan_link }, room=game['player1']['address'])
       emit('opponent_disconnected', room=game['player1']['address'])
+    
+    cosmos_db.replace_item(item=game['id'], body=game)
 
 def get_eth_prices():
   while True:
