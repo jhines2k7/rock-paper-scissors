@@ -1113,7 +1113,7 @@ def handle_disconnect():
         logger.info('Player2 accepted the contract. Issuing a refund.')
         tx_hash = refund_wager(game, payee=game['player2'])
         game['transactions'].append(web3.to_hex(tx_hash))
-        game['player2']['wager_refunded'] = True
+        cosmos_db.replace_item(item=game['id'], body=game)
         # send player a txn link to etherscan
         etherscan_link = None
         if 'sepolia' in args.env or 'ganache' in args.env:
@@ -1129,7 +1129,7 @@ def handle_disconnect():
         logger.info('Player1 accepted the contract. Issuing a refund.')
         tx_hash = refund_wager(game, payee=game['player1'])
         game['transactions'].append(web3.to_hex(tx_hash))
-        game['player1']['wager_refunded'] = True
+        cosmos_db.replace_item(item=game['id'], body=game)
         # send player a txn link to etherscan
         etherscan_link = None
         if 'sepolia' in args.env or 'ganache' in args.env:
