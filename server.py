@@ -549,6 +549,7 @@ def handle_contract_rejected(data):
     if game['player2']['contract_accepted']:
       payee=game['player2']
   else:
+    game['player2']['contract_rejected'] = True
     # did the other player accept the contract?
     if game['player1']['contract_accepted']:
       payee=game['player1']
@@ -570,13 +571,13 @@ def handle_contract_rejected(data):
       
     cosmos_db.replace_item(item=game['id'], body=game)
 
-  # send player a txn link to etherscan
-  etherscan_link = None
-  if 'sepolia' in args.env or 'ganache' in args.env:
-    etherscan_link = f"https://sepolia.etherscan.io/tx/{web3.to_hex(tx_hash)}"
-  elif 'mainnet' in args.env:
-    etherscan_link = f"https://etherscan.io/tx/{web3.to_hex(tx_hash)}"
-  emit('player_stake_refunded', { 'etherscan_link': etherscan_link }, room=payee['address'])
+    # send player a txn link to etherscan
+    etherscan_link = None
+    if 'sepolia' in args.env or 'ganache' in args.env:
+      etherscan_link = f"https://sepolia.etherscan.io/tx/{web3.to_hex(tx_hash)}"
+    elif 'mainnet' in args.env:
+      etherscan_link = f"https://etherscan.io/tx/{web3.to_hex(tx_hash)}"
+    emit('player_stake_refunded', { 'etherscan_link': etherscan_link }, room=payee['address'])
   
 @socketio.on('pay_stake_confirmation')
 def handle_pay_stake_confirmation(data):
