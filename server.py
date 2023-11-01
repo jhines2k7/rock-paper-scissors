@@ -375,8 +375,8 @@ def get_new_game():
     'transactions': [],
     'insufficient_funds': False,
     'rpc_error': False,
-    'game_over': False,
-    'contract_rejected': False
+    'contract_rejected': False,
+    'game_over': False
   }
 
 def get_new_player():
@@ -390,7 +390,9 @@ def get_new_player():
     'wager_accepted': False,
     'wager_offered': False,
     'contract_accepted': False,
-    'contract_rejected': False
+    'contract_rejected': False,
+    'rpc_error': False,
+    'wager_refunded': False
   }
 
 @app.route('/rps-contract-abi', methods=['GET'])
@@ -413,11 +415,47 @@ def handle_rpc_error(data):
 
   if game['game_over']:    
     return
+  
+  payee = None  
+  # determine which player got the RPC error
+  if game['player1']['address'] == data['address']:
+    game['player1']['rpc_error'] = True
+    # did the other player accept the contract?
+    if game['player2']['contract_accepted']:
+      payee=game['player2']
+  else:
+    game['player2']['rpc_error'] = True
+    # did the other player accept the contract?
+    if game['player1']['contract_accepted']:
+      payee=game['player1']
+  
+  cosmos_db.replace_item(item=game['id'], body=game)
+
+  # is there a payee?
+  if payee is not None and not payee['wager_refunded']:
+    # refund the player that accepted the contract
+    tx_hash = refund_wager(game, payee=payee)
+    
+    if game['player1']['address'] == data['address']:
+      game['player1']['wager_refunded'] = True
+    else:
+      game['player2']['wager_refunded'] = True
+    
+    game['transactions'].append(web3.to_hex(tx_hash))
+
+    cosmos_db.replace_item(item=game['id'], body=game)
+
+    # send player a txn link to etherscan
+    etherscan_link = None
+    if 'sepolia' in args.env or 'ganache' in args.env:
+      etherscan_link = f"https://sepolia.etherscan.io/tx/{web3.to_hex(tx_hash)}"
+    elif 'mainnet' in args.env:
+      etherscan_link = f"https://etherscan.io/tx/{web3.to_hex(tx_hash)}"
+    emit('player_stake_refunded', { 'etherscan_link': etherscan_link }, room=payee['address'])
     
   game['rpc_error'] = True
   game['game_over'] = True
 
-  # cosmos_db.upsert_item(body=game)
   cosmos_db.replace_item(item=game['id'], body=game)
 
 @socketio.on('insufficient_funds')  
@@ -446,17 +484,42 @@ def handle_contract_rejected(data):
   # determine which player rejected the contract
   if game['player1']['address'] == data['address']:
     game['player1']['contract_rejected'] = True
-    # has the other player accepted the contract
-    if 
+    # did the other player accept the contract?
+    if game['player2']['contract_accepted']:
+      payee=game['player2']
   else:
     game['player2']['contract_rejected'] = True
-  
-  game['game_over'] = True
+    # did the other player accept the contract?
+    if game['player1']['contract_accepted']:
+      payee=game['player1']
 
+  game['game_over'] = True
+  game['contract_rejected'] = True
+  
   cosmos_db.replace_item(item=game['id'], body=game)
 
+  # is there a payee?
+  if payee is not None and not payee['wager_refunded']:
+    # refund the player that accepted the contract
+    tx_hash = refund_wager(game, payee=payee)
+    
+    if game['player1']['address'] == data['address']:
+      game['player1']['wager_refunded'] = True
+    else:
+      game['player2']['wager_refunded'] = True
+      
+    cosmos_db.replace_item(item=game['id'], body=game)
+
+    # send player a txn link to etherscan
+    etherscan_link = None
+    if 'sepolia' in args.env or 'ganache' in args.env:
+      etherscan_link = f"https://sepolia.etherscan.io/tx/{web3.to_hex(tx_hash)}"
+    elif 'mainnet' in args.env:
+      etherscan_link = f"https://etherscan.io/tx/{web3.to_hex(tx_hash)}"
+    emit('player_stake_refunded', { 'etherscan_link': etherscan_link }, room=payee['address'])
+  
 @socketio.on('pay_stake_confirmation')
-def handle_join_contract_confirmation(data):
+def handle_pay_stake_confirmation(data):
   game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
   logger.info('join contract confirmation number: %s', data)
 
@@ -498,7 +561,6 @@ def handle_join_contract_confirmation(data):
       logger.info('One player decided not to join the contract. Notifying the opposing player and issuing a refund.')
       emit('player_stake_refunded', { 'etherscan_link': etherscan_link, 'reason': 'contract_rejected' }, room=payee['address'])
   
-  # cosmos_db.upsert_item(body=game)
   cosmos_db.replace_item(item=game['id'], body=game)
 
 @socketio.on('pay_stake_hash')
@@ -517,7 +579,6 @@ def handle_join_contract_hash(data):
 
 @socketio.on('pay_stake_receipt')
 def handle_join_contract_receipt(data):
-  # game = games[data['game_id']]
   game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
   logger.info('join contract transaction receipt received: %s', data)
   logger.info(f"Current game state in on join_contract_receipt: {game}")
@@ -937,7 +998,7 @@ def handle_disconnect():
   for game in games:
     game['game_over'] = True
     cosmos_db.replace_item(item=game['id'], body=game)
-
+    # do we need to issue a refund?
     if game['player1']['address'] == address:
       logger.info('Player1 {} disconnected from game {}.'.format(address, game['id']))
       emit('opponent_disconnected', room=game['player2']['address'])
