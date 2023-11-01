@@ -415,8 +415,7 @@ def get_new_player():
     'contract_accepted': False,
     'contract_rejected': False,
     'rpc_error': False,
-    'wager_refunded': False,
-    'player_disconnected': False
+    'wager_refunded': False
   }
 
 @app.route('/rps-contract-abi', methods=['GET'])
