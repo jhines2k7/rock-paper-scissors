@@ -565,10 +565,10 @@ def handle_contract_rejected(data):
     # refund the player that accepted the contract
     tx_hash = refund_wager(game, payee=payee)
     
-    if game['player1']['address'] == data['address']:
-      game['player1']['wager_refunded'] = True
-    else:
+    if game['player1']['address'] == data['address']: # this means player one rejected the contract and player 2 was refunded
       game['player2']['wager_refunded'] = True
+    else:
+      game['player1']['wager_refunded'] = True
       
     cosmos_db.replace_item(item=game['id'], body=game)
 
