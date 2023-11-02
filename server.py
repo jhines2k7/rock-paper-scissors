@@ -482,6 +482,8 @@ def handle_contract_rejected(data):
 
   logging.info(f"Player {data['address']} rejected the contract.")
 
+  payee = None
+  
   # determine which player rejected the contract
   if game['player1']['address'] == data['address']:
     game['player1']['contract_rejected'] = True
