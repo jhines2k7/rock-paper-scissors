@@ -116,11 +116,6 @@ queue_client = None
 health = HealthCheck()
 app.add_url_rule("/healthcheck", "healthcheck", view_func=lambda: health.run())
 
-def eth_to_usd(eth_balance):
-  latest_price = get_eth_price()
-  eth_price = Decimal(latest_price)  # convert the result to Decimal
-  return eth_balance * eth_price
-
 def create_queue_client():
   try:
     logger.info("Creating Azure Queue storage client...")
