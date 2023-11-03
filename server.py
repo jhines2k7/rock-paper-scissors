@@ -1053,7 +1053,6 @@ def handle_disconnect():
   logger.info('Player with address {} disconnected.'.format(address))
 
   QUERY = "SELECT * FROM games g WHERE g.game_over = false"
-  # params = [dict(name="@address", value=address)]
   results = cosmos_db.query_items(query=QUERY, enable_cross_partition_query=True)
   games = [game for game in results]
 
