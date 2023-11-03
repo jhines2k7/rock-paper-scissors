@@ -672,12 +672,10 @@ def handle_connect():
 
     message = queue_client.receive_message()
     player1 = json.loads(message.content)
-    logger.info(f"Player1 joining game: {player1}")
     queue_client.delete_message(message)
 
     message = queue_client.receive_message()
     player2 = json.loads(message.content)
-    logger.info(f"Player2 joining game: {player1}")
     queue_client.delete_message(message)
 
     join_game(player1, player2)
@@ -685,11 +683,8 @@ def handle_connect():
 def join_game(player1, player2):
   if player1['address'] == player2['address']:
     # put player2 back in the queue
-    # queue_client.send_message(player2)
-    logger.info('Both players have the same address. Removing both players from the queue.')
-    properties = queue_client.get_queue_properties()
-    player_count = properties.approximate_message_count
-    logger.info(f"Number of players in queue: {player_count}")
+    queue_client.send_message(player2)
+    logger.info('Both players have the same address. Putting the second player back in the queue.')
     return
   
   # determine if either player has already joined a game
