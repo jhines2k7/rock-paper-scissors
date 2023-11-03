@@ -4,13 +4,16 @@ async-timeout==4.0.3
 attrs==23.1.0
 azure-core==1.29.5
 azure-cosmos==4.5.1
+azure-storage-queue==12.7.3
 bidict==0.22.1
 bitarray==2.8.2
 blinker==1.6.2
 cachetools==5.3.1
 certifi==2023.7.22
+cffi==1.16.0
 charset-normalizer==3.3.0
 click==8.1.7
+cryptography==41.0.5
 cytoolz==0.12.2
 eth-abi==4.2.1
 eth-account==0.9.0
@@ -37,6 +40,7 @@ h11==0.14.0
 hexbytes==0.3.1
 httplib2==0.22.0
 idna==3.4
+isodate==0.6.1
 itsdangerous==2.1.2
 Jinja2==3.1.2
 jsonschema==4.19.1
@@ -49,6 +53,7 @@ parsimonious==0.9.0
 protobuf==4.24.3
 pyasn1==0.5.0
 pyasn1-modules==0.3.0
+pycparser==2.21
 pycryptodome==3.19.0
 pyparsing==3.1.1
 python-dotenv==1.0.0
