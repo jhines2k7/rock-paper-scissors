@@ -34,6 +34,7 @@ from datetime import datetime
 from azure.cosmos import CosmosClient, PartitionKey
 from azure.core.exceptions import ResourceExistsError
 from azure.storage.queue import QueueClient
+from healthcheck import HealthCheck, EnvironmentDump
 
 logging.basicConfig(
   stream=sys.stderr,
@@ -113,6 +114,9 @@ rps_contract_factory_abi = None
 rps_contract_abi = None
 cosmos_db = None
 queue_client = None
+
+health = HealthCheck()
+app.add_url_rule("/healthcheck", "healthcheck", view_func=lambda: health.run())
 
 def create_queue_client():
   try:
