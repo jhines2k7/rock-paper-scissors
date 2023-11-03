@@ -14,6 +14,7 @@ import binascii
 import requests
 import time
 import threading
+import ast
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -31,6 +32,8 @@ from dotenv import load_dotenv
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from azure.cosmos import CosmosClient, PartitionKey
+from azure.core.exceptions import ResourceExistsError
+from azure.storage.queue import QueueServiceClient, QueueClient, QueueMessage, BinaryBase64DecodePolicy, BinaryBase64EncodePolicy
 
 logging.basicConfig(
   stream=sys.stderr,
@@ -82,6 +85,7 @@ COSMOS_ENDPOINT = os.getenv("COSMOS_ENDPOINT")
 COSMOS_KEY = os.getenv("COSMOS_KEY")
 COSMOS_DB_NAME = os.getenv("COSMOS_DB_NAME")
 COSMOS_CONTAINER_NAME = os.getenv("COSMOS_CONTAINER_NAME")
+AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 
 # Connection
 web3 = Web3(Web3.HTTPProvider(HTTP_PROVIDER))
@@ -108,6 +112,18 @@ ethereum_prices = []
 rps_contract_factory_abi = None
 rps_contract_abi = None
 cosmos_db = None
+queue_client = None
+
+def create_queue_client():
+  try:
+    logger.info("Creating Azure Queue storage client...")
+    queue_name = "rock-paper-scissors-dev1"
+
+    logger.info(f"Creating queue: {queue_name}")
+
+    return QueueClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING, queue_name)
+  except Exception as ex:
+    logger.error(f"Exception:{ex}")
 
 def create_comsos_container():
   client = CosmosClient(url=COSMOS_ENDPOINT, credential=COSMOS_KEY)
@@ -594,57 +610,55 @@ def handle_connect():
   # create a new player
   player = get_new_player()
   player['address'] = address
+
   # add the player to the queue
-  logger.info('Adding player with address {} to queue'.format(address))
-  player_queue.put(player)
+  logger.info(f"Adding player with address {address} to queue")
+  queue_client.send_message(json.dumps(player))
 
   join_room(address)
+
+  # are there at least 2 players in the queue?
+  properties = queue_client.get_queue_properties()
+  player_count = properties.approximate_message_count
+  logger.info(f"Waiting for players to join. Number of players in queue: {player_count}")
   
-  if player_queue.qsize() >= 2:
-    join_game()
-    logger.info('Game started. Number of players in queue: {}'.format(player_queue.qsize()))
-  else:
-    logger.info('Waiting for players to join. Number of players in queue: {}'.format(player_queue.qsize()))
+  if player_count >= 2:
+    # remove the first two players from the queue
+    player1 = None
+    player2 = None
 
-def join_game():
-  # try to remove the first two players from the queue
-  player1 = None
-  player2 = None
+    message = queue_client.receive_message()
+    player1 = json.loads(message.content)
+    queue_client.delete_message(message)
 
-  try:
-    player1 = player_queue.get_nowait()
-  except queue.Empty:
-    logger.info('Player queue is empty.')
-    return
-  try:
-    player2 = player_queue.get_nowait()
-  except queue.Empty:
-    # put the first player back in the queue
-    player_queue.put(player1)
-    logger.info('Player queue has less than two players.')
-    return
-  # if both players have the same address, return
+    message = queue_client.receive_message()
+    player2 = json.loads(message.content)
+    queue_client.delete_message(message)
+
+    join_game(player1, player2)
+
+def join_game(player1, player2):
   if player1['address'] == player2['address']:
-      # put player2 back in the queue
-      player_queue.put(player2)
-      logger.info('Both players have the same address. Putting the second player back in the queue.')
-      return
+    # put player2 back in the queue
+    queue_client.send_message(player2)
+    logger.info('Both players have the same address. Putting the second player back in the queue.')
+    return
   
   # determine if either player has already joined a game
-  QUERY = "SELECT * FROM games g WHERE g.player1.address = @address AND g.game_over = 'false'"
+  QUERY = "SELECT * FROM games g WHERE g.player1.address = @address AND g.game_over = false"
   params = [dict(name="@address", value=player1['address'])]
   results = cosmos_db.query_items(query=QUERY, parameters=params, enable_cross_partition_query=True)
   games = [game for game in results]
   if len(games) > 0:
-    logger.info('Player {} has already joined a game.'.format(player1['address']))
+    logger.info(f"Player {player1['address']} has already joined a game")
     return
 
-  QUERY = "SELECT * FROM games g WHERE g.player2.address = @address AND g.game_over = 'false'"
+  QUERY = "SELECT * FROM games g WHERE g.player2.address = @address AND g.game_over = false"
   params = [dict(name="@address", value=player2['address'])]
   results = cosmos_db.query_items(query=QUERY, parameters=params, enable_cross_partition_query=True)
   games = [game for game in results]
   if len(games) > 0:
-    logger.info('Player {} has already joined a game.'.format(player2['address']))
+    logger.info(f"Player {player2['address']} has already joined a game")
     return
   
   # create a new game
@@ -989,12 +1003,10 @@ def handle_choice(data):
 
 @socketio.on('disconnect')
 def handle_disconnect():
-  # the `request` context still contains the disconnection information
   address = request.args.get('address')
   logger.info('Player with address {} disconnected.'.format(address))
 
   QUERY = "SELECT * FROM games g WHERE g.game_over = false"
-  # params = [dict(name="@address", value=address)]
   results = cosmos_db.query_items(query=QUERY, enable_cross_partition_query=True)
   games = [game for game in results]
 
@@ -1054,7 +1066,15 @@ if __name__ == '__main__':
   
   logger.info('Downloading contract ABIs...')
   download_contract_abi()
+
   cosmos_db = create_comsos_container()
+
+  queue_client = create_queue_client()
+
+  try:
+    queue_client.create_queue()
+  except ResourceExistsError:
+    pass
 
   # thread = threading.Thread(target=get_eth_prices)
   # thread.start()
