@@ -371,7 +371,7 @@ def refund_wager(game, payee):
     'from': contract_owner_checksum_address,
     'nonce': nonce,
     'maxFeePerGas': max_fee_per_gas_estimate,
-    'maxPriorityFeePerGas': gas_fee_estimate
+    'maxPriorityFeePerGas': max_fee_per_gas_estimate
   })
 
   signed = contract_owner_account.sign_transaction(rps_txn)
