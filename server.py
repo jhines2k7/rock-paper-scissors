@@ -14,6 +14,7 @@ import binascii
 import requests
 import time
 import threading
+import ast
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -31,6 +32,10 @@ from dotenv import load_dotenv
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from azure.cosmos import CosmosClient, PartitionKey
+from azure.core.exceptions import ResourceExistsError
+from azure.storage.queue import QueueClient
+from healthcheck import HealthCheck
+from decimal import ROUND_DOWN, Decimal
 
 logging.basicConfig(
   stream=sys.stderr,
@@ -82,6 +87,9 @@ COSMOS_ENDPOINT = os.getenv("COSMOS_ENDPOINT")
 COSMOS_KEY = os.getenv("COSMOS_KEY")
 COSMOS_DB_NAME = os.getenv("COSMOS_DB_NAME")
 COSMOS_CONTAINER_NAME = os.getenv("COSMOS_CONTAINER_NAME")
+AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+AZURE_QUEUE_NAME = os.getenv("AZURE_QUEUE_NAME")
+COSMOS_PARTITION_KEY = os.getenv("COSMOS_PARTITION_KEY")
 
 # Connection
 web3 = Web3(Web3.HTTPProvider(HTTP_PROVIDER))
@@ -99,20 +107,34 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv("SECRET_KEY")
 CORS(app)
 socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins='*')
-# games = {}
-player_queue = queue.Queue()
-players = {}
-
-ethereum_prices = []
 
 rps_contract_factory_abi = None
 rps_contract_abi = None
 cosmos_db = None
+queue_client = None
+
+health = HealthCheck()
+app.add_url_rule("/healthcheck", "healthcheck", view_func=lambda: health.run())
+
+def eth_to_usd(eth_balance):
+  latest_price = get_eth_price()
+  eth_price = Decimal(latest_price)  # convert the result to Decimal
+  return eth_balance * eth_price
+
+def create_queue_client():
+  try:
+    logger.info("Creating Azure Queue storage client...")
+
+    logger.info(f"Creating queue: {AZURE_QUEUE_NAME}")
+
+    return QueueClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING, AZURE_QUEUE_NAME)
+  except Exception as ex:
+    logger.error(f"Exception:{ex}")
 
 def create_comsos_container():
   client = CosmosClient(url=COSMOS_ENDPOINT, credential=COSMOS_KEY)
   database = client.create_database_if_not_exists(id=COSMOS_DB_NAME)
-  key_path = PartitionKey(path="/contract_address")
+  key_path = PartitionKey(path=COSMOS_PARTITION_KEY)
 
   return database.create_container_if_not_exists(
     id=COSMOS_CONTAINER_NAME,
@@ -376,7 +398,8 @@ def get_new_game():
     'insufficient_funds': False,
     'rpc_error': False,
     'contract_rejected': False,
-    'game_over': False
+    'game_over': False,
+    'uncaught_exception_occured': False
   }
 
 def get_new_player():
@@ -594,57 +617,60 @@ def handle_connect():
   # create a new player
   player = get_new_player()
   player['address'] = address
+
   # add the player to the queue
-  logger.info('Adding player with address {} to queue'.format(address))
-  player_queue.put(player)
+  logger.info(f"Adding player with address {address} to queue")
+  queue_client.send_message(json.dumps(player))
 
   join_room(address)
+
+  # are there at least 2 players in the queue?
+  properties = queue_client.get_queue_properties()
+  player_count = properties.approximate_message_count
+  logger.info(f"Waiting for players to join. Number of players in queue: {player_count}")
   
-  if player_queue.qsize() >= 2:
-    join_game()
-    logger.info('Game started. Number of players in queue: {}'.format(player_queue.qsize()))
-  else:
-    logger.info('Waiting for players to join. Number of players in queue: {}'.format(player_queue.qsize()))
+  if player_count >= 2:
+    # remove the first two players from the queue
+    player1 = None
+    player2 = None
 
-def join_game():
-  # try to remove the first two players from the queue
-  player1 = None
-  player2 = None
+    message = queue_client.receive_message()
+    player1 = json.loads(message.content)
+    logger.info(f"Player1 joining game: {player1}")
+    queue_client.delete_message(message)
 
-  try:
-    player1 = player_queue.get_nowait()
-  except queue.Empty:
-    logger.info('Player queue is empty.')
-    return
-  try:
-    player2 = player_queue.get_nowait()
-  except queue.Empty:
-    # put the first player back in the queue
-    player_queue.put(player1)
-    logger.info('Player queue has less than two players.')
-    return
-  # if both players have the same address, return
+    message = queue_client.receive_message()
+    player2 = json.loads(message.content)
+    logger.info(f"Player2 joining game: {player1}")
+    queue_client.delete_message(message)
+
+    join_game(player1, player2)
+
+def join_game(player1, player2):
   if player1['address'] == player2['address']:
-      # put player2 back in the queue
-      player_queue.put(player2)
-      logger.info('Both players have the same address. Putting the second player back in the queue.')
-      return
+    # put player2 back in the queue
+    # queue_client.send_message(player2)
+    logger.info('Both players have the same address. Removing both players from the queue.')
+    properties = queue_client.get_queue_properties()
+    player_count = properties.approximate_message_count
+    logger.info(f"Number of players in queue: {player_count}")
+    return
   
   # determine if either player has already joined a game
-  QUERY = "SELECT * FROM games g WHERE g.player1.address = @address AND g.game_over = 'false'"
+  QUERY = "SELECT * FROM games g WHERE g.player1.address = @address AND g.game_over = false"
   params = [dict(name="@address", value=player1['address'])]
   results = cosmos_db.query_items(query=QUERY, parameters=params, enable_cross_partition_query=True)
   games = [game for game in results]
   if len(games) > 0:
-    logger.info('Player {} has already joined a game.'.format(player1['address']))
+    logger.info(f"Player {player1['address']} has already joined a game")
     return
 
-  QUERY = "SELECT * FROM games g WHERE g.player2.address = @address AND g.game_over = 'false'"
+  QUERY = "SELECT * FROM games g WHERE g.player2.address = @address AND g.game_over = false"
   params = [dict(name="@address", value=player2['address'])]
   results = cosmos_db.query_items(query=QUERY, parameters=params, enable_cross_partition_query=True)
   games = [game for game in results]
   if len(games) > 0:
-    logger.info('Player {} has already joined a game.'.format(player2['address']))
+    logger.info(f"Player {player2['address']} has already joined a game")
     return
   
   # create a new game
@@ -857,18 +883,6 @@ def handle_choice(data):
         'maxPriorityFeePerGas': gas_fee_estimate
       })
     else:
-      game['winner'] = winner
-      game['loser'] = loser
-
-      logger.info('Winning player: {}'.format(winner))
-      logger.info('Losing player: {}'.format(loser))
-      # assign winnings to the winning player
-      # losing_wager = int(loser['wager'].replace('$', ''))
-      game['winner']['winnings'] = loser['wager']
-      # assign losses to the losing player
-      game['loser']['losses'] = loser['wager']
-
-      # cosmos_db.upsert_item(body=game)
       cosmos_db.replace_item(item=game['id'], body=game)
 
       winner_address = winner['address']
@@ -878,6 +892,23 @@ def handle_choice(data):
       p2_win_game_fee = player_2_stake_in_ether * 0.1
       win_game_fee = p1_win_game_fee + p2_win_game_fee
       logger.info(f"Win game fee: {win_game_fee}")
+
+      total_stake_in_ether = player_1_stake_in_ether + player_2_stake_in_ether
+      winnings = total_stake_in_ether - win_game_fee
+      logger.info(f"Winnings minus fee: {winnings}")
+
+      winnings_in_usd = eth_to_usd(Decimal(str(winnings)))
+      winnings_to_float = float(winnings_in_usd.quantize(Decimal('0.00'), rounding=ROUND_DOWN))
+
+      game['winner'] = winner
+      game['loser'] = loser
+
+      logger.info('Winning player: {}'.format(winner))
+      logger.info('Losing player: {}'.format(loser))
+      # assign winnings to the winning player
+      game['winner']['winnings'] = winnings_to_float
+      # assign losses to the losing player
+      game['loser']['losses'] = loser['wager']
 
       gas_estimate_txn = rps_contract.functions.payWinner(web3.to_checksum_address(winner_address), 
                                                       player_1_stake_in_wei,
@@ -950,7 +981,7 @@ def handle_choice(data):
     # GAME OVER, man!
     game['game_over'] = True
 
-    logger.info(f"Current game state in on choice after payign winner: {game}")
+    logger.info(f"Current game state in on choice after paying winner: {game}")
     logger.info(f"Final game state: {game}")
 
     cosmos_db.replace_item(item=game['id'], body=game)
@@ -987,21 +1018,23 @@ def handle_choice(data):
         'losses': game['loser']['losses']
         }, room=game['loser']['address'])        
 
+def decimal_default(obj):
+  if isinstance(obj, Decimal):
+    # Round down to 2 decimal places
+    return float(obj.quantize(Decimal('0.00'), rounding=ROUND_DOWN))
+  raise TypeError
+
 @socketio.on('disconnect')
 def handle_disconnect():
-  # the `request` context still contains the disconnection information
   address = request.args.get('address')
   logger.info('Player with address {} disconnected.'.format(address))
 
   QUERY = "SELECT * FROM games g WHERE g.game_over = false"
-  # params = [dict(name="@address", value=address)]
   results = cosmos_db.query_items(query=QUERY, enable_cross_partition_query=True)
   games = [game for game in results]
 
   for game in games:
     game['game_over'] = True
-    cosmos_db.replace_item(item=game['id'], body=game)
-    # do we need to issue a refund?
     if game['player1']['address'] == address:
       logger.info('Player1 {} disconnected from game {}.'.format(address, game['id']))
       game['player1']['player_disconnected'] = True
@@ -1038,6 +1071,46 @@ def handle_disconnect():
     
     cosmos_db.replace_item(item=game['id'], body=game)
 
+def global_exception_handler(type, value, traceback):
+  txn_logger.error('!!!UNCAUGHT EXCEPTION OCCURED!!!')
+  txn_logger.error(f"UNCAUGHT EXCEPTION TYPE: {type}")
+  txn_logger.error(f"UNCAUGHT EXCEPTION VALUE: {value}")
+  
+  # determine if refunds need to be issued
+  QUERY = "SELECT * FROM games g WHERE g.game_over = false"
+  results = cosmos_db.query_items(query=QUERY, enable_cross_partition_query=True)
+  games = [game for game in results]
+
+  for game in games:
+    game['game_over'] = True
+    if game['player2']['contract_accepted'] and not game['player2']['wager_refunded']:
+      logger.info('Player2 accepted the contract. Issuing a refund.')
+      tx_hash = refund_wager(game, payee=game['player2'])
+      game['transactions'].append(web3.to_hex(tx_hash))
+      game['player2']['wager_refunded'] = True
+      # send player a txn link to etherscan
+      etherscan_link = None
+      if 'sepolia' in args.env or 'ganache' in args.env:
+        etherscan_link = f"https://sepolia.etherscan.io/tx/{web3.to_hex(tx_hash)}"
+      elif 'mainnet' in args.env:
+        etherscan_link = f"https://etherscan.io/tx/{web3.to_hex(tx_hash)}"
+      emit('uncaught_exception_occured', { 'etherscan_link': etherscan_link }, room=game['player2']['address'])
+
+    if game['player1']['contract_accepted'] and not game['player1']['wager_refunded']:
+      logger.info('Player1 accepted the contract. Issuing a refund.')
+      tx_hash = refund_wager(game, payee=game['player1'])
+      game['transactions'].append(web3.to_hex(tx_hash))
+      game['player1']['wager_refunded'] = True
+      # send player a txn link to etherscan
+      etherscan_link = None
+      if 'sepolia' in args.env or 'ganache' in args.env:
+        etherscan_link = f"https://sepolia.etherscan.io/tx/{web3.to_hex(tx_hash)}"
+      elif 'mainnet' in args.env:
+        etherscan_link = f"https://etherscan.io/tx/{web3.to_hex(tx_hash)}"
+      emit('uncaught_exception_occured', { 'etherscan_link': etherscan_link }, room=game['player1']['address'])
+
+sys.excepthook = global_exception_handler
+
 def get_eth_prices():
   while True:
     current_price = get_eth_price()
@@ -1056,7 +1129,15 @@ if __name__ == '__main__':
   
   logger.info('Downloading contract ABIs...')
   download_contract_abi()
+
   cosmos_db = create_comsos_container()
+
+  queue_client = create_queue_client()
+
+  try:
+    queue_client.create_queue()
+  except ResourceExistsError:
+    pass
 
   # thread = threading.Thread(target=get_eth_prices)
   # thread.start()
