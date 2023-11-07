@@ -928,12 +928,12 @@ def handle_choice(data):
       win_game_fee = p1_win_game_fee + p2_win_game_fee
       logger.info(f"Win game fee: {win_game_fee}")
 
-      total_stake_in_ether = player_1_stake_in_ether + player_2_stake_in_ether
-      winnings = total_stake_in_ether - win_game_fee
+      loser_wager_in_eth = usd_to_eth(float(loser['wager'].replace('$', '')))
+      winnings = loser_wager_in_eth - win_game_fee
       logger.info(f"Winnings minus fee: {winnings}")
 
       winnings_in_usd = eth_to_usd(Decimal(str(winnings)))
-      winnings_to_float = float(winnings_in_usd.quantize(Decimal('0.00'), rounding=ROUND_DOWN))
+      winnings_to_float = round(float(winnings_in_usd), 2)
 
       game['winner'] = winner
       game['loser'] = loser
@@ -1064,12 +1064,6 @@ def handle_choice(data):
         'opp_choice': game['winner']['choice'], 
         'losses': game['loser']['losses']
         }, room=game['loser']['address'])        
-
-def decimal_default(obj):
-  if isinstance(obj, Decimal):
-    # Round down to 2 decimal places
-    return float(obj.quantize(Decimal('0.00'), rounding=ROUND_DOWN))
-  raise TypeError
 
 @socketio.on('disconnect')
 def handle_disconnect():
