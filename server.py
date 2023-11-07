@@ -1040,12 +1040,6 @@ def handle_choice(data):
         'losses': game['loser']['losses']
         }, room=game['loser']['address'])        
 
-def decimal_default(obj):
-  if isinstance(obj, Decimal):
-    # Round down to 2 decimal places
-    return float(obj.quantize(Decimal('0.00'), rounding=ROUND_DOWN))
-  raise TypeError
-
 @socketio.on('disconnect')
 def handle_disconnect():
   address = request.args.get('address')
