@@ -879,7 +879,7 @@ def handle_choice(data):
         'from': contract_owner_checksum_address,
         'nonce': nonce,
         'maxFeePerGas': max_fee_per_gas_estimate,
-        'maxPriorityFeePerGas': gas_fee_estimate
+        'maxPriorityFeePerGas': max_fee_per_gas_estimate
       })
     else:
       cosmos_db.replace_item(item=game['id'], body=game)
@@ -935,7 +935,7 @@ def handle_choice(data):
         'from': contract_owner_checksum_address,
         'nonce': nonce,
         'maxFeePerGas': max_fee_per_gas_estimate,
-        'maxPriorityFeePerGas': gas_fee_estimate
+        'maxPriorityFeePerGas': max_fee_per_gas_estimate
       })
 
     tx_hash = None
