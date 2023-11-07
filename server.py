@@ -1119,6 +1119,46 @@ def handle_disconnect():
     
     cosmos_db.replace_item(item=game['id'], body=game)
 
+def global_exception_handler(type, value, traceback):
+  txn_logger.error('!!!UNCAUGHT EXCEPTION OCCURED!!!')
+  txn_logger.error(f"UNCAUGHT EXCEPTION TYPE: {type}")
+  txn_logger.error(f"UNCAUGHT EXCEPTION VALUE: {value}")
+  
+  # determine if refunds need to be issued
+  QUERY = "SELECT * FROM games g WHERE g.game_over = false"
+  results = cosmos_db.query_items(query=QUERY, enable_cross_partition_query=True)
+  games = [game for game in results]
+
+  for game in games:
+    game['game_over'] = True
+    if game['player2']['contract_accepted'] and not game['player2']['wager_refunded']:
+      logger.info('Player2 accepted the contract. Issuing a refund.')
+      tx_hash = refund_wager(game, payee=game['player2'])
+      game['transactions'].append(web3.to_hex(tx_hash))
+      game['player2']['wager_refunded'] = True
+      # send player a txn link to etherscan
+      etherscan_link = None
+      if 'sepolia' in args.env or 'ganache' in args.env:
+        etherscan_link = f"https://sepolia.etherscan.io/tx/{web3.to_hex(tx_hash)}"
+      elif 'mainnet' in args.env:
+        etherscan_link = f"https://etherscan.io/tx/{web3.to_hex(tx_hash)}"
+      emit('uncaught_exception_occured', { 'etherscan_link': etherscan_link }, room=game['player2']['address'])
+
+    if game['player1']['contract_accepted'] and not game['player1']['wager_refunded']:
+      logger.info('Player1 accepted the contract. Issuing a refund.')
+      tx_hash = refund_wager(game, payee=game['player1'])
+      game['transactions'].append(web3.to_hex(tx_hash))
+      game['player1']['wager_refunded'] = True
+      # send player a txn link to etherscan
+      etherscan_link = None
+      if 'sepolia' in args.env or 'ganache' in args.env:
+        etherscan_link = f"https://sepolia.etherscan.io/tx/{web3.to_hex(tx_hash)}"
+      elif 'mainnet' in args.env:
+        etherscan_link = f"https://etherscan.io/tx/{web3.to_hex(tx_hash)}"
+      emit('uncaught_exception_occured', { 'etherscan_link': etherscan_link }, room=game['player1']['address'])
+
+sys.excepthook = global_exception_handler
+
 def get_eth_prices():
   while True:
     current_price = get_eth_price()
