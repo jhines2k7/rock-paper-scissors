@@ -119,7 +119,7 @@ health = HealthCheck()
 app.add_url_rule("/healthcheck", "healthcheck", view_func=lambda: health.run())
 
 def eth_to_usd(eth_balance):
-  latest_price = get_eth_price()
+  latest_price = ethereum_prices[-1] #get_eth_price()
   eth_price = Decimal(latest_price)  # convert the result to Decimal
   return eth_balance * eth_price
 
@@ -324,7 +324,7 @@ def refund_wager(game, payee):
   fast_gas_price = float(gas_oracle['result']['FastGasPrice'])
   logger.info(f"Fast gas price for payWinner: {fast_gas_price}")
 
-  suggest_base_fee = float(gas_oracle['result']['suggestBaseFee'])
+  suggest_base_fee = int(gas_oracle['result']['SuggestBaseFee'])
   logger.info(f"Suggested base fee for payWinner: {suggest_base_fee}")
 
   max_priority_fee_per_gas = round(fast_gas_price) - round(suggest_base_fee)
@@ -366,7 +366,7 @@ def refund_wager(game, payee):
   logger.info(f"Gas estimate for refund wager txn: {gas_estimate}")
 
   max_fee_per_gas = suggest_base_fee * 2 + fast_gas_price
-  logger.info(f"Max fee per gas in wei: {web3.to_wei(max_fee_per_gas, 'gwei')}")
+  logger.info(f"Max fee per gas in wei: {web3.utils.toWei(max_fee_per_gas, 'gwei')}")
 
   rps_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee['address']), 
                                                         refund_in_wei,
