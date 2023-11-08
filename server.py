@@ -442,7 +442,7 @@ def handle_get_ethereum_price():
   if not game:
     return
 
-  return ethereum_prices[-1]
+  return str(ethereum_prices[-1])
 
 @app.route('/gas-oracle', methods=['GET'])
 def handle_get_gas_oracle():
