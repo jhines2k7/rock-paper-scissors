@@ -429,7 +429,8 @@ def get_new_player():
     'contract_accepted': False,
     'contract_rejected': False,
     'rpc_error': False,
-    'wager_refunded': False
+    'wager_refunded': False,
+    'player_disconnected': False
   }
 
 @app.route('/ethereum-price', methods=['GET'])
@@ -1076,7 +1077,6 @@ def handle_disconnect():
 
   for game in games:
     game['game_over'] = True
-    cosmos_db.replace_item(item=game['id'], body=game)
     # do we need to issue a refund?
     if game['player1']['address'] == address:
       logger.info('Player1 {} disconnected from game {}.'.format(address, game['id']))
