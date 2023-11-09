@@ -112,12 +112,14 @@ rps_contract_factory_abi = None
 rps_contract_abi = None
 cosmos_db = None
 queue_client = None
+gas_oracles = []
+ethereum_prices = []
 
 health = HealthCheck()
 app.add_url_rule("/healthcheck", "healthcheck", view_func=lambda: health.run())
 
 def eth_to_usd(eth_balance):
-  latest_price = get_eth_price()
+  latest_price = ethereum_prices[-1] #get_eth_price()
   eth_price = Decimal(latest_price)  # convert the result to Decimal
   return eth_balance * eth_price
 
@@ -174,7 +176,7 @@ def get_eth_price():
     raise Exception("Failed to fetch Ethereum price after several attempts")
 
 def usd_to_eth(usd):
-  eth_price = get_eth_price()
+  eth_price = ethereum_prices[-1] #get_eth_price()
   return usd / eth_price
 
 def convert_bytes_to_hex(bytes_value):
@@ -317,12 +319,13 @@ def refund_wager(game, payee):
   tx_hash = None
   rps_txn = None
 
-  gas_oracle = get_gas_oracle()
+  gas_oracle = gas_oracles[-1] # get_gas_oracle()
 
-  gas_price = int(gas_oracle['result']['FastGasPrice'])
-  logger.info(f"Gas price for payWinnner: {gas_price}")
+  fast_gas_price = int(gas_oracle['result']['FastGasPrice'])
+  logger.info(f"Fast gas price for payWinner: {fast_gas_price}")
 
-  last_block = int(gas_oracle['result']['LastBlock'])
+  suggest_base_fee = float(gas_oracle['result']['suggestBaseFee'])
+  logger.info(f"Suggested base fee for payWinner: {suggest_base_fee}")
 
   contract_owner_checksum_address = web3.to_checksum_address(contract_owner_account.address)
 
@@ -359,19 +362,18 @@ def refund_wager(game, payee):
   gas_estimate = web3.eth.estimate_gas(gas_estimate_txn)
   logger.info(f"Gas estimate for refund wager txn: {gas_estimate}")
 
-  gas_fee_estimate = gas_estimate * gas_price
-  logger.info(f"Gas fee estimate for refund txn: {gas_fee_estimate}")
-
-  max_fee_per_gas_estimate = last_block * gas_price
+  max_fee_per_gas = suggest_base_fee * 2 + fast_gas_price
+  logger.info(f"Max fee per gas in wei: {web3.to_wei(max_fee_per_gas, 'gwei')}")
 
   rps_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee['address']), 
                                                         refund_in_wei,
                                                         web3.to_wei(refund_fee, 'ether'),
                                                         game['id']).build_transaction({
     'from': contract_owner_checksum_address,
+    'gas': gas_estimate,
     'nonce': nonce,
-    'maxFeePerGas': max_fee_per_gas_estimate,
-    'maxPriorityFeePerGas': gas_fee_estimate
+    'maxFeePerGas': web3.to_wei(max_fee_per_gas, 'gwei'),
+    'maxPriorityFeePerGas': web3.to_wei(gas_oracle['result']['FastGasPrice'], 'gwei')
   })
 
   signed = contract_owner_account.sign_transaction(rps_txn)
@@ -418,6 +420,28 @@ def get_new_player():
     'wager_refunded': False,
     'player_disconnected': False
   }
+
+@app.route('/ethereum-price', methods=['GET'])
+def handle_get_ethereum_price():
+  game_id = request.args.get('game_id')
+  
+  game = cosmos_db.read_item(item=game_id, partition_key=RPS_CONTRACT_ADDRESS)
+
+  if not game:
+    return
+
+  return str(ethereum_prices[-1])
+
+@app.route('/gas-oracle', methods=['GET'])
+def handle_get_gas_oracle():
+  game_id = request.args.get('game_id')
+  
+  game = cosmos_db.read_item(item=game_id, partition_key=RPS_CONTRACT_ADDRESS)
+
+  if not game:
+    return
+
+  return gas_oracles[-1]
 
 @app.route('/rps-contract-abi', methods=['GET'])
 def get_rps_contract_abi():
@@ -821,12 +845,13 @@ def handle_choice(data):
     rps_contract = web3.eth.contract(address=rps_contract_address, abi=rps_contract_abi)
     rps_txn = None
     
-    gas_oracle = get_gas_oracle()
+    gas_oracle = gas_oracles[-1] # get_gas_oracle()
 
-    gas_price = int(gas_oracle['result']['FastGasPrice'])
-    logger.info(f"Gas price for payWinnner: {gas_price}")
+    fast_gas_price = int(gas_oracle['result']['FastGasPrice'])
+    logger.info(f"Fast gas price for payWinner: {fast_gas_price}")
 
-    last_block = int(gas_oracle['result']['LastBlock'])
+    suggest_base_fee = float(gas_oracle['result']['suggestBaseFee'])
+    logger.info(f"Suggested base fee for payWinner: {suggest_base_fee}")
 
     contract_owner_account = Account.from_key(CONTRACT_OWNER_PRIVATE_KEY)
     logger.info(f"Contract owner account address: {contract_owner_account.address}")
@@ -866,10 +891,8 @@ def handle_choice(data):
       gas_estimate = web3.eth.estimate_gas(gas_estimate_txn)
       logger.info(f"Gas estimate for payWinner txn: {gas_estimate}")
 
-      gas_fee_estimate = gas_estimate * gas_price
-      logger.info(f"Gas fee estimate for payWinner txn: {gas_fee_estimate}")
-
-      max_fee_per_gas_estimate = last_block * gas_price
+      max_fee_per_gas = suggest_base_fee * 2 + fast_gas_price
+      logger.info(f"Max fee per gas in wei: {web3.to_wei(max_fee_per_gas, 'gwei')}")
       
       rps_txn = rps_contract.functions.payDraw(web3.to_checksum_address(player_1_address), 
                                            web3.to_checksum_address(player_2_address), 
@@ -879,8 +902,9 @@ def handle_choice(data):
                                            game['id']).build_transaction({
         'from': contract_owner_checksum_address,
         'nonce': nonce,
-        'maxFeePerGas': max_fee_per_gas_estimate,
-        'maxPriorityFeePerGas': gas_fee_estimate
+        'gas': gas_estimate,
+        'maxFeePerGas': web3.to_wei(max_fee_per_gas, 'gwei'),
+        'maxPriorityFeePerGas': web3.to_wei(gas_oracle['result']['FastGasPrice'], 'gwei')
       })
     else:
       cosmos_db.replace_item(item=game['id'], body=game)
@@ -922,10 +946,8 @@ def handle_choice(data):
       gas_estimate = web3.eth.estimate_gas(gas_estimate_txn)
       logger.info(f"Gas estimate for payWinner txn: {gas_estimate}")
 
-      gas_fee_estimate = gas_estimate * gas_price
-      logger.info(f"Gas fee estimate for payWinner txn: {gas_fee_estimate}")
-
-      max_fee_per_gas_estimate = last_block * gas_price
+      max_fee_per_gas = suggest_base_fee * 2 + fast_gas_price
+      logger.info(f"Max fee per gas in wei: {web3.to_wei(max_fee_per_gas, 'gwei')}")
 
       rps_txn = rps_contract.functions.payWinner(
           web3.to_checksum_address(winner_address), 
@@ -934,9 +956,10 @@ def handle_choice(data):
           web3.to_wei(win_game_fee, 'ether'), 
           game['id']).build_transaction({
         'from': contract_owner_checksum_address,
+        'gas': gas_estimate,
         'nonce': nonce,
-        'maxFeePerGas': max_fee_per_gas_estimate,
-        'maxPriorityFeePerGas': gas_fee_estimate
+        'maxFeePerGas': web3.to_wei(max_fee_per_gas, 'gwei'),
+        'maxPriorityFeePerGas': web3.to_wei(gas_oracle['result']['FastGasPrice'], 'gwei')
       })
 
     tx_hash = None
@@ -1117,6 +1140,18 @@ def get_eth_prices():
 
     time.sleep(45)
 
+def get_gas_oracles():
+  while True:
+    gas_oracle = get_gas_oracle()
+    logger.info(f"Gas oracle: {gas_oracle}")
+    global gas_oracles
+    gas_oracles.append(gas_oracle)
+
+    if len(gas_oracles) > 10:
+      gas_oracles = gas_oracles[-5:]
+
+    time.sleep(30)
+
 if __name__ == '__main__':
   from geventwebsocket.handler import WebSocketHandler
   from gevent.pywsgi import WSGIServer
@@ -1133,8 +1168,11 @@ if __name__ == '__main__':
   except ResourceExistsError:
     pass
 
-  # thread = threading.Thread(target=get_eth_prices)
-  # thread.start()
+  thread = threading.Thread(target=get_eth_prices)
+  thread.start()
+  
+  thread = threading.Thread(target=get_gas_oracles)
+  thread.start()
 
   logger.info('Starting server...')
 
