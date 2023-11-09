@@ -324,7 +324,7 @@ def refund_wager(game, payee):
   fast_gas_price = int(gas_oracle['result']['FastGasPrice'])
   logger.info(f"Fast gas price for payWinner: {fast_gas_price}")
 
-  suggest_base_fee = int(gas_oracle['result']['SuggestBaseFee'])
+  suggest_base_fee = float(gas_oracle['result']['suggestBaseFee'])
   logger.info(f"Suggested base fee for payWinner: {suggest_base_fee}")
 
   contract_owner_checksum_address = web3.to_checksum_address(contract_owner_account.address)
@@ -363,7 +363,7 @@ def refund_wager(game, payee):
   logger.info(f"Gas estimate for refund wager txn: {gas_estimate}")
 
   max_fee_per_gas = suggest_base_fee * 2 + fast_gas_price
-  logger.info(f"Max fee per gas in wei: {web3.utils.toWei(max_fee_per_gas, 'gwei')}")
+  logger.info(f"Max fee per gas in wei: {web3.to_wei(max_fee_per_gas, 'gwei')}")
 
   rps_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee['address']), 
                                                         refund_in_wei,
@@ -372,8 +372,8 @@ def refund_wager(game, payee):
     'from': contract_owner_checksum_address,
     'gas': gas_estimate,
     'nonce': nonce,
-    'maxFeePerGas': web3.utils.toWei(max_fee_per_gas, 'gwei'),
-    'maxPriorityFeePerGas': web3.utils.toWei(gas_oracle['result']['FastGasPrice'], 'gwei')
+    'maxFeePerGas': web3.to_wei(max_fee_per_gas, 'gwei'),
+    'maxPriorityFeePerGas': web3.to_wei(gas_oracle['result']['FastGasPrice'], 'gwei')
   })
 
   signed = contract_owner_account.sign_transaction(rps_txn)
@@ -861,7 +861,7 @@ def handle_choice(data):
     fast_gas_price = int(gas_oracle['result']['FastGasPrice'])
     logger.info(f"Fast gas price for payWinner: {fast_gas_price}")
 
-    suggest_base_fee = int(gas_oracle['result']['SuggestBaseFee'])
+    suggest_base_fee = float(gas_oracle['result']['suggestBaseFee'])
     logger.info(f"Suggested base fee for payWinner: {suggest_base_fee}")
 
     contract_owner_account = Account.from_key(CONTRACT_OWNER_PRIVATE_KEY)
@@ -903,7 +903,7 @@ def handle_choice(data):
       logger.info(f"Gas estimate for payWinner txn: {gas_estimate}")
 
       max_fee_per_gas = suggest_base_fee * 2 + fast_gas_price
-      logger.info(f"Max fee per gas in wei: {web3.utils.toWei(max_fee_per_gas, 'gwei')}")
+      logger.info(f"Max fee per gas in wei: {web3.to_wei(max_fee_per_gas, 'gwei')}")
       
       rps_txn = rps_contract.functions.payDraw(web3.to_checksum_address(player_1_address), 
                                            web3.to_checksum_address(player_2_address), 
@@ -914,8 +914,8 @@ def handle_choice(data):
         'from': contract_owner_checksum_address,
         'nonce': nonce,
         'gas': gas_estimate,
-        'maxFeePerGas': web3.utils.toWei(max_fee_per_gas, 'gwei'),
-        'maxPriorityFeePerGas': web3.utils.toWei(gas_oracle['result']['FastGasPrice'], 'gwei')
+        'maxFeePerGas': web3.to_wei(max_fee_per_gas, 'gwei'),
+        'maxPriorityFeePerGas': web3.to_wei(gas_oracle['result']['FastGasPrice'], 'gwei')
       })
     else:
       cosmos_db.replace_item(item=game['id'], body=game)
@@ -958,7 +958,7 @@ def handle_choice(data):
       logger.info(f"Gas estimate for payWinner txn: {gas_estimate}")
 
       max_fee_per_gas = suggest_base_fee * 2 + fast_gas_price
-      logger.info(f"Max fee per gas in wei: {web3.utils.toWei(max_fee_per_gas, 'gwei')}")
+      logger.info(f"Max fee per gas in wei: {web3.to_wei(max_fee_per_gas, 'gwei')}")
 
       rps_txn = rps_contract.functions.payWinner(
           web3.to_checksum_address(winner_address), 
@@ -969,8 +969,8 @@ def handle_choice(data):
         'from': contract_owner_checksum_address,
         'gas': gas_estimate,
         'nonce': nonce,
-        'maxFeePerGas': web3.utils.toWei(max_fee_per_gas, 'gwei'),
-        'maxPriorityFeePerGas': web3.utils.toWei(gas_oracle['result']['FastGasPrice'], 'gwei')
+        'maxFeePerGas': web3.to_wei(max_fee_per_gas, 'gwei'),
+        'maxPriorityFeePerGas': web3.to_wei(gas_oracle['result']['FastGasPrice'], 'gwei')
       })
 
     tx_hash = None
