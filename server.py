@@ -607,8 +607,7 @@ def handle_pay_stake_confirmation(data):
 @socketio.on('paying_stake')
 def handle_paying_stake(data):
   game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
-  logger.info('pay_stake_confirmation received: %s', data)
-  logger.info(f"Current game state in on pay_stake_confirmation: {game}")
+  logger.info(f"Notifying player their opponent has made a choice: {game}")
 
   if game['player1']['player_id'] == data['player_id']: # player 1 accepted the contract
     # notify the other player that player1 accepted the contract
@@ -619,11 +618,9 @@ def handle_paying_stake(data):
 @socketio.on('pay_stake_hash')
 def handle_join_contract_hash(data):
   logger.info('join contract transaction hash received: %s', data)
-  # game = games[data['game_id']]
   game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
   game['transactions'].append(data['transaction_hash'])
   
-  # cosmos_db.upsert_item(body=game)
   cosmos_db.replace_item(item=game['id'], body=game)
   
   txn_logger.critical(f"Join contract transaction hash: {data['transaction_hash']}, game_id: {game['id']}, address: {data['player_id']}")
