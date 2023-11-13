@@ -604,6 +604,12 @@ def handle_pay_stake_confirmation(data):
   logger.info('pay_stake_confirmation received: %s', data)
   logger.info(f"Current game state in on pay_stake_confirmation: {game}")
 
+@socketio.on('paying_stake')
+def handle_paying_stake(data):
+  game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
+  logger.info('pay_stake_confirmation received: %s', data)
+  logger.info(f"Current game state in on pay_stake_confirmation: {game}")
+
   if game['player1']['player_id'] == data['player_id']: # player 1 accepted the contract
     # notify the other player that player1 accepted the contract
     emit('opponent_accepted_contract', room=game['player2']['player_id'])
