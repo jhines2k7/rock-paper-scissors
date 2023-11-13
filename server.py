@@ -324,7 +324,7 @@ def refund_wager(game, payee):
   fast_gas_price = float(gas_oracle['result']['FastGasPrice'])
   logger.info(f"Fast gas price for payWinner: {fast_gas_price}")
 
-  suggest_base_fee = int(gas_oracle['result']['SuggestBaseFee'])
+  suggest_base_fee = float(gas_oracle['result']['suggestBaseFee'])
   logger.info(f"Suggested base fee for payWinner: {suggest_base_fee}")
 
   max_priority_fee_per_gas = round(fast_gas_price) - round(suggest_base_fee)
@@ -364,9 +364,6 @@ def refund_wager(game, payee):
 
   gas_estimate = web3.eth.estimate_gas(gas_estimate_txn)
   logger.info(f"Gas estimate for refund wager txn: {gas_estimate}")
-
-  max_fee_per_gas = suggest_base_fee * 2 + fast_gas_price
-  logger.info(f"Max fee per gas in wei: {web3.utils.toWei(max_fee_per_gas, 'gwei')}")
 
   rps_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee['address']), 
                                                         refund_in_wei,
@@ -609,9 +606,9 @@ def handle_pay_stake_confirmation(data):
 
   if game['player1']['player_id'] == data['player_id']: # player 1 accepted the contract
     # notify the other player that player1 accepted the contract
-    emit('opponent_accepted_contract', { 'address': data['address'] }, room=game['player2']['player_id'])
+    emit('opponent_accepted_contract', room=game['player2']['player_id'])
   else:
-    emit('opponent_accepted_contract', { 'address': data['address'] }, room=game['player1']['player_id'])
+    emit('opponent_accepted_contract', room=game['player1']['player_id'])
 
 @socketio.on('pay_stake_hash')
 def handle_join_contract_hash(data):
