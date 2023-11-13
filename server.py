@@ -635,8 +635,6 @@ def handle_pay_stake_receipt(data):
   if game['player1']['player_id'] == data['player_id']: # player 1 accepted the contract
     game['player1']['address'] = data['address']
     game['player1']['contract_accepted'] = True
-    # notify the other player that player1 accepted the contract
-    emit('opponent_accepted_contract', { 'address': data['address'] }, room=game['player2']['player_id'])
   else:
     game['player2']['address'] = data['address']
     game['player2']['contract_accepted'] = True
