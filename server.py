@@ -437,6 +437,23 @@ def get_new_player(player_id=None):
     'player_disconnected': False
   }
 
+@app.route('/get-wager', methods=['GET'])
+def handle_get_wager():
+  game_id = request.args.get('game_id')
+  player_id = request.args.get('player_id')
+  
+  game = cosmos_db.read_item(item=game_id, partition_key=RPS_CONTRACT_ADDRESS)
+
+  if not game:
+    return
+
+  logger.info(f"Current game state in on get_wager: {game}")
+
+  if game['player1']['player_id'] == player_id:    
+    return { 'wager': game['player1']['wager'], 'contract_address': RPS_CONTRACT_ADDRESS }
+  else:
+    return { 'wager': game['player2']['wager'], 'contract_address': RPS_CONTRACT_ADDRESS }
+
 @app.route('/ethereum-price', methods=['GET'])
 def handle_get_ethereum_price():
   game_id = request.args.get('game_id')
@@ -618,6 +635,8 @@ def handle_pay_stake_receipt(data):
   if game['player1']['player_id'] == data['player_id']: # player 1 accepted the contract
     game['player1']['address'] = data['address']
     game['player1']['contract_accepted'] = True
+    # notify the other player that player1 accepted the contract
+    emit('opponent_accepted_contract', { 'address': data['address'] }, room=game['player2']['player_id'])
   else:
     game['player2']['address'] = data['address']
     game['player2']['contract_accepted'] = True
