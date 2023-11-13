@@ -894,8 +894,8 @@ def settle_game(game_id=None):
   
   gas_oracle = gas_oracles[-1] # get_gas_oracle()
 
-    gas_price = int(gas_oracle['result']['FastGasPrice'])
-    logger.info(f"Gas price for payWinnner: {gas_price}")
+  fast_gas_price = int(gas_oracle['result']['FastGasPrice'])
+  logger.info(f"Gas price for payWinnner: {fast_gas_price}")
 
   suggest_base_fee = float(gas_oracle['result']['suggestBaseFee'])
   logger.info(f"Suggested base fee for payWinner: {suggest_base_fee}")
