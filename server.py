@@ -321,11 +321,14 @@ def refund_wager(game, payee):
 
   gas_oracle = gas_oracles[-1] # get_gas_oracle()
 
-  fast_gas_price = int(gas_oracle['result']['FastGasPrice'])
+  fast_gas_price = float(gas_oracle['result']['FastGasPrice'])
   logger.info(f"Fast gas price for payWinner: {fast_gas_price}")
 
   suggest_base_fee = float(gas_oracle['result']['suggestBaseFee'])
   logger.info(f"Suggested base fee for payWinner: {suggest_base_fee}")
+
+  max_priority_fee_per_gas = round(fast_gas_price) - round(suggest_base_fee)
+  logger.info(f"Max priority fee per gas: {max_priority_fee_per_gas}")
 
   contract_owner_checksum_address = web3.to_checksum_address(contract_owner_account.address)
 
@@ -372,8 +375,8 @@ def refund_wager(game, payee):
     'from': contract_owner_checksum_address,
     'gas': gas_estimate,
     'nonce': nonce,
-    'maxFeePerGas': web3.to_wei(max_fee_per_gas, 'gwei'),
-    'maxPriorityFeePerGas': web3.to_wei(gas_oracle['result']['FastGasPrice'], 'gwei')
+    'maxFeePerGas': web3.to_wei(gas_oracle['result']['SafeGasPrice'], 'gwei'),
+    'maxPriorityFeePerGas': web3.to_wei(str(max_priority_fee_per_gas), 'gwei')
   })
 
   signed = contract_owner_account.sign_transaction(rps_txn)
@@ -528,7 +531,7 @@ def handle_rpc_error(data):
       etherscan_link = f"https://sepolia.etherscan.io/tx/{web3.to_hex(tx_hash)}"
     elif 'mainnet' in args.env:
       etherscan_link = f"https://etherscan.io/tx/{web3.to_hex(tx_hash)}"
-    emit('player_stake_refunded', { 'etherscan_link': etherscan_link }, room=payee['address'])
+    emit('player_stake_refunded', { 'etherscan_link': etherscan_link }, room=payee['player_id'])
     
   game['rpc_error'] = True
   game['game_over'] = True
@@ -595,13 +598,19 @@ def handle_contract_rejected(data):
       etherscan_link = f"https://sepolia.etherscan.io/tx/{web3.to_hex(tx_hash)}"
     elif 'mainnet' in args.env:
       etherscan_link = f"https://etherscan.io/tx/{web3.to_hex(tx_hash)}"
-    emit('player_stake_refunded', { 'etherscan_link': etherscan_link }, room=payee['address'])
+    emit('player_stake_refunded', { 'etherscan_link': etherscan_link }, room=payee['player_id'])
   
 @socketio.on('pay_stake_confirmation')
 def handle_pay_stake_confirmation(data):
   game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
   logger.info('pay_stake_confirmation received: %s', data)
   logger.info(f"Current game state in on pay_stake_confirmation: {game}")
+
+  if game['player1']['player_id'] == data['player_id']: # player 1 accepted the contract
+    # notify the other player that player1 accepted the contract
+    emit('opponent_accepted_contract', { 'address': data['address'] }, room=game['player2']['player_id'])
+  else:
+    emit('opponent_accepted_contract', { 'address': data['address'] }, room=game['player1']['player_id'])
 
 @socketio.on('pay_stake_hash')
 def handle_join_contract_hash(data):
@@ -621,16 +630,13 @@ def handle_join_contract_hash(data):
 def handle_pay_stake_receipt(data):
   game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
 
-   # which player accepted the contract
+  # which player accepted the contract
   if game['player1']['player_id'] == data['player_id']: # player 1 accepted the contract
     game['player1']['address'] = data['address']
     game['player1']['contract_accepted'] = True
-    # notify the other player that player1 accepted the contract
-    emit('opponent_accepted_contract', { 'address': data['address'] }, room=game['player2']['player_id'])
   else:
     game['player2']['address'] = data['address']
     game['player2']['contract_accepted'] = True
-    emit('opponent_accepted_contract', { 'address': data['address'] }, room=game['player1']['player_id'])
 
   cosmos_db.replace_item(item=game['id'], body=game)
 
@@ -664,13 +670,13 @@ def handle_pay_stake_receipt(data):
     
     if game['insufficient_funds']:
       logger.info('One player did not have the funds to join the contract. Notifying the opposing player and issuing a refund.')
-      emit('player_stake_refunded', { 'etherscan_link': etherscan_link, 'reason': 'insufficient_funds' }, room=payee['address'])
+      emit('player_stake_refunded', { 'etherscan_link': etherscan_link, 'reason': 'insufficient_funds' }, room=payee['player_id'])
     elif game['rpc_error']:
       logger.info('One player experienced an RPC error. Notifying the opposing player and issuing a refund.')
-      emit('player_stake_refunded', { 'etherscan_link': etherscan_link, 'reason': 'rpc_error' }, room=payee['address'])
+      emit('player_stake_refunded', { 'etherscan_link': etherscan_link, 'reason': 'rpc_error' }, room=payee['player_id'])
     else:
       logger.info('One player decided not to join the contract. Notifying the opposing player and issuing a refund.')
-      emit('player_stake_refunded', { 'etherscan_link': etherscan_link, 'reason': 'contract_rejected' }, room=payee['address'])
+      emit('player_stake_refunded', { 'etherscan_link': etherscan_link, 'reason': 'contract_rejected' }, room=payee['player_id'])
   
     cosmos_db.replace_item(item=game['id'], body=game)
 
@@ -895,11 +901,14 @@ def settle_game(game_id=None):
   
   gas_oracle = gas_oracles[-1] # get_gas_oracle()
 
-  fast_gas_price = int(gas_oracle['result']['FastGasPrice'])
-  logger.info(f"Gas price for payWinnner: {fast_gas_price}")
+  fast_gas_price = float(gas_oracle['result']['FastGasPrice'])
+  logger.info(f"Fast gas price for payWinner: {fast_gas_price}")
 
   suggest_base_fee = float(gas_oracle['result']['suggestBaseFee'])
   logger.info(f"Suggested base fee for payWinner: {suggest_base_fee}")
+
+  max_priority_gas_fee = round(fast_gas_price) - round(suggest_base_fee)
+  logger.info(f"Max priority gas fee for payWinner: {max_priority_gas_fee}")
 
   contract_owner_account = Account.from_key(CONTRACT_OWNER_PRIVATE_KEY)
   logger.info(f"Contract owner account address: {contract_owner_account.address}")
@@ -951,8 +960,8 @@ def settle_game(game_id=None):
       'from': contract_owner_checksum_address,
       'nonce': nonce,
       'gas': gas_estimate,
-      'maxFeePerGas': web3.to_wei(max_fee_per_gas, 'gwei'),
-      'maxPriorityFeePerGas': web3.to_wei(gas_oracle['result']['FastGasPrice'], 'gwei')
+      'maxFeePerGas': web3.to_wei(gas_oracle['result']['SafeGasPrice'], 'gwei'),
+      'maxPriorityFeePerGas': web3.to_wei(str(max_priority_gas_fee), 'gwei')
     })
   else:
     winner_address = winner['address']
@@ -992,9 +1001,6 @@ def settle_game(game_id=None):
     gas_estimate = web3.eth.estimate_gas(gas_estimate_txn)
     logger.info(f"Gas estimate for payWinner txn: {gas_estimate}")
 
-    max_fee_per_gas = suggest_base_fee * 2 + fast_gas_price
-    logger.info(f"Max fee per gas in wei: {web3.to_wei(max_fee_per_gas, 'gwei')}")
-
     rps_txn = rps_contract.functions.payWinner(
         web3.to_checksum_address(winner_address), 
         player_1_stake_in_wei, 
@@ -1004,8 +1010,8 @@ def settle_game(game_id=None):
       'from': contract_owner_checksum_address,
       'gas': gas_estimate,
       'nonce': nonce,
-      'maxFeePerGas': web3.to_wei(max_fee_per_gas, 'gwei'),
-      'maxPriorityFeePerGas': web3.to_wei(gas_oracle['result']['FastGasPrice'], 'gwei')
+      'maxFeePerGas': web3.to_wei(gas_oracle['result']['SafeGasPrice'], 'gwei'),
+      'maxPriorityFeePerGas': web3.to_wei(str(max_priority_gas_fee), 'gwei')
     })
 
   cosmos_db.replace_item(item=game['id'], body=game)
@@ -1053,12 +1059,12 @@ def settle_game(game_id=None):
     game['transactions'].append(web3.to_hex(tx_hash))
   except ValueError as e:
     logger.error(f"A ValueError occurred: {str(e)}")
-    # notify both players there was an error deciding the winner
+    # notify both players there was an error while settling the bet
     emit('pay_winner_error', room=game['player1']['player_id'])
     emit('pay_winner_error', room=game['player2']['player_id'])
   except Exception as e:
     logger.error(f"An error occurred: {str(e)}")
-    # notify both players there was an deciding the winner
+    # notify both players there was an error while settling the bet
     emit('pay_winner_error', room=game['player1']['player_id'])
     emit('pay_winner_error', room=game['player2']['player_id'])
   
