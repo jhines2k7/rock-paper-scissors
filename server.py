@@ -601,21 +601,7 @@ def handle_contract_rejected(data):
 def handle_pay_stake_confirmation(data):
   game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
   logger.info('pay_stake_confirmation received: %s', data)
-  logger.info('join contract confirmation number: %s', data)
   logger.info(f"Current game state in on pay_stake_confirmation: {game}")
-
-  # which player accepted the contract
-  if game['player1']['player_id'] == data['player_id']: # player 1 accepted the contract
-    game['player1']['address'] = data['address']
-    game['player1']['contract_accepted'] = True
-    # notify the other player that player1 accepted the contract
-    emit('opponent_accepted_contract', { 'address': data['address'] }, room=game['player2']['player_id'])
-  else:
-    game['player2']['address'] = data['address']
-    game['player2']['contract_accepted'] = True
-    emit('opponent_accepted_contract', { 'address': data['address'] }, room=game['player1']['player_id'])
-  
-  cosmos_db.replace_item(item=game['id'], body=game)
 
 @socketio.on('pay_stake_hash')
 def handle_join_contract_hash(data):
@@ -635,12 +621,27 @@ def handle_join_contract_hash(data):
 def handle_pay_stake_receipt(data):
   game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
 
+   # which player accepted the contract
+  if game['player1']['player_id'] == data['player_id']: # player 1 accepted the contract
+    game['player1']['address'] = data['address']
+    game['player1']['contract_accepted'] = True
+    # notify the other player that player1 accepted the contract
+    emit('opponent_accepted_contract', { 'address': data['address'] }, room=game['player2']['player_id'])
+  else:
+    game['player2']['address'] = data['address']
+    game['player2']['contract_accepted'] = True
+    emit('opponent_accepted_contract', { 'address': data['address'] }, room=game['player1']['player_id'])
+
+  cosmos_db.replace_item(item=game['id'], body=game)
+
+  logger.info(f"Current game state in on pay_stake_receipt: {game}")
+
   if game['player1']['contract_accepted'] and game['player2']['contract_accepted']:
     emit('both_players_accepted_contract', { 'contract_address': RPS_CONTRACT_ADDRESS }, room=game['player2']['player_id'])
     emit('both_players_accepted_contract', { 'contract_address': RPS_CONTRACT_ADDRESS }, room=game['player1']['player_id'])
     settle_game(game['id'])
     return
-
+  
   # if the game is over, one player has already rejected the contract, or there were insufficient funds
   if game['game_over']:
     payee = None
