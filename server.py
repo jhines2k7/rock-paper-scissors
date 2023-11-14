@@ -365,9 +365,22 @@ def refund_wager(game, payee):
   gas_estimate = web3.eth.estimate_gas(gas_estimate_txn)
   logger.info(f"Gas estimate for refund wager txn: {gas_estimate}")
 
+  # Calculate the estimated transaction cost in wei
+  est_total_cost_wei = gas_estimate * web3.to_wei(gas_oracle['result']['SafeGasPrice'], 'gwei')
+
+  # Convert wei to ether, if needed
+  est_total_cost_eth = web3.from_wei(est_total_cost_wei, 'ether')
+  logger.info(f'Estimated total cost in ether to refund wager: {est_total_cost_eth}')
+
+  est_total_cost_usd = eth_to_usd(Decimal(str(est_total_cost_eth)))
+  logger.info(f'Estimated total cost in USD to refund wager: {est_total_cost_usd}')
+  txn_logger.critical(f"Estimated total cost in USD to refund wager: {est_total_cost_usd}")
+
+  gas_fee_premium = 1.12 * float(est_total_cost_eth)
+
   rps_txn = rps_contract.functions.refundWager(web3.to_checksum_address(payee['address']), 
                                                         refund_in_wei,
-                                                        web3.to_wei(refund_fee, 'ether'),
+                                                        web3.to_wei(str(gas_fee_premium), 'ether'),
                                                         game['id']).build_transaction({
     'from': contract_owner_checksum_address,
     'gas': gas_estimate,
@@ -390,11 +403,11 @@ def refund_wager(game, payee):
 
   # Convert wei to ether, if needed
   total_cost_eth = web3.from_wei(total_cost_wei, 'ether')
-  logger.info(f'Total cost in ether: {total_cost_eth}')
+  logger.info(f'Actual total cost in ether: {total_cost_eth}')
 
   total_cost_usd = eth_to_usd(Decimal(str(total_cost_eth)))
-  logger.info(f'Total cost in USD: {total_cost_usd}')
-  txn_logger.critical(f"Total cost in USD: {total_cost_usd} for transaction hash: {web3.to_hex(tx_hash)}")
+  logger.info(f'Actual total cost in USD: {total_cost_usd}')
+  txn_logger.critical(f"Actual total cost in USD: {total_cost_usd} for transaction hash: {web3.to_hex(tx_hash)}")
   logger.info(f'Transaction receipt after refundWager was called: {tx_receipt}')
   game['transactions'].append(web3.to_hex(tx_hash))
 
@@ -874,7 +887,6 @@ def handle_choice(data):
     emit('both_players_chose', {'wager': game['player1']['wager'], 'contract_address': RPS_CONTRACT_ADDRESS }, room=game['player1']['player_id'])
     emit('both_players_chose', {'wager': game['player2']['wager'], 'contract_address': RPS_CONTRACT_ADDRESS }, room=game['player2']['player_id'])
             
-
 def settle_game(game_id=None):
   game = cosmos_db.read_item(item=game_id, partition_key=RPS_CONTRACT_ADDRESS)
 
@@ -949,9 +961,22 @@ def settle_game(game_id=None):
     gas_estimate = web3.eth.estimate_gas(gas_estimate_txn)
     logger.info(f"Gas estimate for payWinner txn: {gas_estimate}")
 
-    max_fee_per_gas = suggest_base_fee * 2 + fast_gas_price
-    logger.info(f"Max fee per gas in wei: {web3.to_wei(max_fee_per_gas, 'gwei')}")
-    
+    # Calculate the estimated transaction cost in wei
+    est_total_cost_wei = gas_estimate * web3.to_wei(gas_oracle['result']['SafeGasPrice'], 'gwei')
+
+    # Convert wei to ether, if needed
+    est_total_cost_eth = web3.from_wei(est_total_cost_wei, 'ether')
+    logger.info(f'Estimated total cost in ether to settle draw: {est_total_cost_eth}')
+
+    gas_fee_premium = Decimal(str(1.12))
+    est_total_cost_usd = eth_to_usd(Decimal(str(est_total_cost_eth)))
+    logger.info(f'Estimated total cost in USD to settle draw: {est_total_cost_usd}')
+    logger.info(f"Estimated total cost with a premium of 12%: {est_total_cost_usd * gas_fee_premium}")
+    txn_logger.critical(f"Estimated total cost in USD to settle draw: {est_total_cost_usd}")
+
+    if est_total_cost_eth * gas_fee_premium > draw_game_fee:
+      draw_game_fee = float(est_total_cost_eth * gas_fee_premium)
+
     rps_txn = rps_contract.functions.payDraw(web3.to_checksum_address(player_1_address), 
                                           web3.to_checksum_address(player_1_address), 
                                           player_1_stake_in_wei, 
@@ -973,22 +998,11 @@ def settle_game(game_id=None):
     win_game_fee = p1_win_game_fee + p2_win_game_fee
     logger.info(f"Win game fee: {win_game_fee}")
 
-    loser_wager_in_eth = usd_to_eth(float(loser['wager'].replace('$', '')))
-    winnings = loser_wager_in_eth - win_game_fee
-    logger.info(f"Winnings minus fee: {winnings}")
-
-    winnings_in_usd = eth_to_usd(Decimal(str(winnings)))
-    winnings_to_float = round(float(winnings_in_usd), 2)
-
     game['winner'] = winner
     game['loser'] = loser
 
     logger.info('Winning player: {}'.format(winner))
     logger.info('Losing player: {}'.format(loser))
-    # assign winnings to the winning player
-    game['winner']['winnings'] = winnings_to_float
-    # assign losses to the losing player
-    game['loser']['losses'] = loser['wager']
 
     gas_estimate_txn = rps_contract.functions.payWinner(web3.to_checksum_address(winner_address), 
                                                     player_1_stake_in_wei,
@@ -1002,6 +1016,34 @@ def settle_game(game_id=None):
     gas_estimate = web3.eth.estimate_gas(gas_estimate_txn)
     logger.info(f"Gas estimate for payWinner txn: {gas_estimate}")
 
+    # Calculate the estimated transaction cost in wei
+    est_total_cost_wei = gas_estimate * web3.to_wei(gas_oracle['result']['SafeGasPrice'], 'gwei')
+
+    # Convert wei to ether, if needed
+    est_total_cost_eth = web3.from_wei(est_total_cost_wei, 'ether')
+    logger.info(f'Estimated total cost in ether to pay winner: {est_total_cost_eth}')
+
+    gas_fee_premium = Decimal(str(1.12))
+    est_total_cost_usd = eth_to_usd(Decimal(str(est_total_cost_eth)))
+    logger.info(f'Estimated total cost in USD to pay winner: {est_total_cost_usd}')
+    logger.info(f"Estimated total cost with a premium of 12%: {est_total_cost_usd * gas_fee_premium}")
+    txn_logger.critical(f"Estimated total cost in USD to pay winner: {est_total_cost_usd}")
+
+    if est_total_cost_eth * gas_fee_premium > win_game_fee:
+      win_game_fee = float(est_total_cost_eth * gas_fee_premium)
+
+    loser_wager_in_eth = usd_to_eth(float(loser['wager'].replace('$', '')))
+    winnings = loser_wager_in_eth - win_game_fee
+    logger.info(f"Winnings minus fee: {winnings}")
+
+    winnings_in_usd = eth_to_usd(Decimal(str(winnings)))
+    winnings_to_float = round(float(winnings_in_usd), 2)
+
+    # assign winnings to the winning player
+    game['winner']['winnings'] = winnings_to_float
+    # assign losses to the losing player
+    game['loser']['losses'] = loser['wager']
+    
     rps_txn = rps_contract.functions.payWinner(
         web3.to_checksum_address(winner_address), 
         player_1_stake_in_wei, 
@@ -1046,17 +1088,17 @@ def settle_game(game_id=None):
     gas_used = tx_receipt.gasUsed
 
     # Calculate the total transaction cost in wei
-    total_cost_wei = gas_used * web3.to_wei(fast_gas_price, 'gwei')
+    total_cost_wei = gas_used * web3.to_wei(gas_oracle['result']['SafeGasPrice'], 'gwei')
 
     # Convert wei to ether, if needed
     total_cost_eth = web3.from_wei(total_cost_wei, 'ether')
-    logger.info(f'Total cost in ether: {total_cost_eth}')
+    logger.info(f'Actual cost in ether to settle game: {total_cost_eth}')
 
     logger.info(f'Transaction receipt after payWinner was called: {tx_receipt}')
 
     total_cost_usd = eth_to_usd(Decimal(str(total_cost_eth)))
-    logger.info(f'Total cost in USD: {total_cost_usd}')
-    txn_logger.critical(f"Total cost in USD: {total_cost_usd} for transaction hash: {web3.to_hex(tx_hash)}")
+    logger.info(f'Actual cost in USD to settle game: {total_cost_usd}')
+    txn_logger.critical(f"Actual cost in USD to settle game: {total_cost_usd} for transaction hash: {web3.to_hex(tx_hash)}")
     game['transactions'].append(web3.to_hex(tx_hash))
   except ValueError as e:
     logger.error(f"A ValueError occurred: {str(e)}")
