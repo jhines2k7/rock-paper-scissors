@@ -406,8 +406,8 @@ def refund_wager(game, payee):
   logger.info(f'Actual total cost in ether: {total_cost_eth}')
 
   total_cost_usd = eth_to_usd(Decimal(str(total_cost_eth)))
-  logger.info(f'Actual total cost in USD: {total_cost_usd}')
-  txn_logger.critical(f"Actual total cost in USD: {total_cost_usd} for transaction hash: {web3.to_hex(tx_hash)}")
+  logger.info(f'Actual total cost in USD to refund wager: {total_cost_usd}')
+  txn_logger.critical(f"Actual total cost in USD to refund wager: {total_cost_usd} for transaction hash: {web3.to_hex(tx_hash)}")
   logger.info(f'Transaction receipt after refundWager was called: {tx_receipt}')
   game['transactions'].append(web3.to_hex(tx_hash))
 
@@ -789,12 +789,12 @@ def handle_submit_wager(data):
     return
   # assign the wager to the correct player  
   # if player1 offered the wager, emit an event to player2 to inform them that player1 offered a wager
-  if player_id == game['player1']['player_id'] and game['player1']['wager_offered'] == False:
+  if player_id == game['player1']['player_id'] and game['player2']['wager_accepted'] == False:
     game['player1']['wager'] = wager
     game['player1']['wager_offered'] = True
     emit('wager_offered', {'wager': wager}, room=game['player2']['player_id'])
   else:
-    if game['player2']['wager_offered'] == False:
+    if game['player1']['wager_accepted'] == False:
       game['player2']['wager'] = wager
       game['player2']['wager_offered'] = True
       emit('wager_offered', {'wager': wager}, room=game['player1']['player_id'])
