@@ -1037,7 +1037,7 @@ def settle_game(game_id=None):
     logger.info(f"Winnings minus fee: {winnings}")
 
     winnings_in_usd = eth_to_usd(Decimal(str(winnings)))
-    winnings_to_float = round(float(winnings_in_usd), 2)
+    winnings_to_float = '{:.2f}'.format(float(winnings_in_usd))
 
     # assign winnings to the winning player
     game['winner']['winnings'] = winnings_to_float
