@@ -978,7 +978,7 @@ def settle_game(game_id=None):
       draw_game_fee = float(est_total_cost_eth * gas_fee_premium)
 
     rps_txn = rps_contract.functions.payDraw(web3.to_checksum_address(player_1_address), 
-                                          web3.to_checksum_address(player_1_address), 
+                                          web3.to_checksum_address(player_2_address), 
                                           player_1_stake_in_wei, 
                                           player_2_stake_in_wei,
                                           web3.to_wei(draw_game_fee, 'ether'),
