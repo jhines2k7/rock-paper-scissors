@@ -395,23 +395,27 @@ def refund_wager(game, payee):
   tx_receipt = None
 
   # Get the transaction receipt for the decide winner transaction
-  tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
-  gas_used = tx_receipt.gasUsed
+  try:
+    tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+    gas_used = tx_receipt.gasUsed
 
-  # Calculate the total transaction cost in wei
-  total_cost_wei = gas_used * web3.to_wei(fast_gas_price, 'gwei')
+    # Calculate the total transaction cost in wei
+    total_cost_wei = gas_used * web3.to_wei(fast_gas_price, 'gwei')
 
-  # Convert wei to ether, if needed
-  total_cost_eth = web3.from_wei(total_cost_wei, 'ether')
-  logger.info(f'Actual total cost in ether: {total_cost_eth}')
+    # Convert wei to ether, if needed
+    total_cost_eth = web3.from_wei(total_cost_wei, 'ether')
+    logger.info(f'Actual total cost in ether: {total_cost_eth}')
 
-  total_cost_usd = eth_to_usd(Decimal(str(total_cost_eth)))
-  logger.info(f'Actual total cost in USD to refund wager: {total_cost_usd}')
-  txn_logger.critical(f"Actual total cost in USD to refund wager: {total_cost_usd} for transaction hash: {web3.to_hex(tx_hash)}")
-  logger.info(f'Transaction receipt after refundWager was called: {tx_receipt}')
-  game['transactions'].append(web3.to_hex(tx_hash))
+    total_cost_usd = eth_to_usd(Decimal(str(total_cost_eth)))
+    logger.info(f'Actual total cost in USD to refund wager: {total_cost_usd}')
+    txn_logger.critical(f"Actual total cost in USD to refund wager: {total_cost_usd} for transaction hash: {web3.to_hex(tx_hash)}")
+    logger.info(f'Transaction receipt after refundWager was called: {tx_receipt}')
+    game['transactions'].append(web3.to_hex(tx_hash))
 
-  return tx_hash
+    return tx_hash
+  except web3.exceptions.TimeExhausted:
+    txn_logger.critical(f"Timed out waiting for refund_wager transaction receipt: {web3.to_hex(tx_hash)}")
+    return tx_hash
 
 def get_new_game():
   return {
@@ -1084,7 +1088,7 @@ def settle_game(game_id=None):
     tx_receipt = None
 
     # Get the transaction receipt for the decide winner transaction
-    tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+    tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
     gas_used = tx_receipt.gasUsed
 
     # Calculate the total transaction cost in wei
@@ -1110,6 +1114,8 @@ def settle_game(game_id=None):
     # notify both players there was an error while settling the bet
     emit('pay_winner_error', room=game['player1']['player_id'])
     emit('pay_winner_error', room=game['player2']['player_id'])
+  except web3.exceptions.TimeExhausted:
+    txn_logger.critical(f"Timed out waiting for transaction receipt for settle_game transaction: {web3.to_hex(tx_hash)}")
   
   # GAME OVER, man!
   game['game_over'] = True
