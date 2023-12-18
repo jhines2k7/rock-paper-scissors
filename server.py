@@ -115,6 +115,8 @@ queue_client = None
 gas_oracles = []
 ethereum_prices = []
 
+nonce_lookup = {}
+
 health = HealthCheck()
 app.add_url_rule("/healthcheck", "healthcheck", view_func=lambda: health.run())
 
@@ -217,7 +219,7 @@ def download_contract_abi():
   key_file_location = 'service-account.json'
     
   # Specify the name of the folder you want to retrieve
-  folder_name = 'rock-paper-scissors'
+  folder_name = 'rock-paper-scissors-v2'
   
   try:
     # Authenticate and construct service.
@@ -278,7 +280,7 @@ def download_contract_abi():
     logger.info('Contract ABIs downloaded successfully!')
 
     # Load and parse the contract ABIs.
-    with open('contracts/RPSContract.json') as f:
+    with open('contracts/RPSContractV2.json') as f:
       global rps_contract_abi
       rps_json = json.load(f)
       rps_contract_abi = rps_json['abi']
@@ -286,6 +288,85 @@ def download_contract_abi():
   except HttpError as error:
     # TODO(developer) - Handle errors from drive API.
     logger.error(f'An error occurred: {error}')
+
+player1_verified = False
+player2_verified = False
+player1_nonce = None
+player2_nonce = None
+
+@socketio.on('nonce_supplied')
+def handle_nonce_supplied(data):
+  game = cosmos_db.read_item(item=data['game_id'], partition_key=RPS_CONTRACT_ADDRESS)
+
+  rps_contract_address = web3.to_checksum_address(RPS_CONTRACT_ADDRESS)
+  logger.info(f"Contract address: {rps_contract_address}")
+  
+  global rps_contract_abi
+  rps_contract = web3.eth.contract(address=rps_contract_address, abi=rps_contract_abi)
+
+  nonce = data['player_nonce']
+
+  player = None
+  
+  if data['player_id'] == game['player1']['player_id']:
+    logger.info(f"Player1 nonce {nonce}")
+    global player1_nonce
+    player1_nonce = nonce
+    player = game['player1']
+  else:
+    logger.info(f"Player2 nonce {nonce}")
+    global player2_nonce
+    player2_nonce = nonce
+    player = game['player2']
+
+  player_move_hash = rps_contract.functions.getPlayerMoveHash(game['id'], player['address']).call()
+  logger.info(f"Player {player['player_id']} move hash: {player_move_hash}")
+
+  verified = verify_move(game_id=game['id'], 
+                                  address=player['address'], 
+                                  choice=player['choice'], 
+                                  nonce=nonce, 
+                                  hash=player_move_hash)
+  logger.info(f"Player {player['player_id']} move verified: {verified}")
+  
+  if data['player_id'] == game['player1']['player_id']:
+    global player1_verified
+    player1_verified = verified
+  else:
+    global player2_verified
+    player2_verified = verified
+
+  if player1_verified and player2_verified:
+    game['player1']['nonce'] = player1_nonce
+    game['player2']['nonce'] = player2_nonce
+    current_game = cosmos_db.replace_item(item=game['id'], body=game)
+    logger.info(f"Current game state in on nonce_supplied: {current_game}")
+
+    logger.info(f"Player1 verified: {player1_verified}, Player2 verified: {player2_verified}")
+    
+    settle_game(game['id'])
+
+def verify_move(game_id, address, choice, nonce, hash):
+  player_move = {
+    'player_address': address,
+    'game_id': game_id,
+    'choice': choice,
+  }
+
+  # convert the player_move to a string
+  player_move_str = json.dumps(player_move)
+  # add the nonce to the player_move string
+  player_move_str += str(nonce)
+  logger.info(f"Player move string: {player_move_str.replace(' ', '')}")
+  # use web3 to hash the player_move string
+  player_move_hash = web3.solidity_keccak(['string'], [player_move_str.replace(' ', '')])
+  logger.info(f"Player move hash from call to web3.solidity_keccak: {player_move_hash.hex()}")
+  logger.info(f"Hash from contract: {hash}")
+
+  if player_move_hash.hex() == hash:
+    return True
+  else:
+    return False
 
 def determine_winner(player1, player2):
   player1_choice = player1['choice']
@@ -448,7 +529,8 @@ def get_new_player(player_id=None):
     'contract_rejected': False,
     'rpc_error': False,
     'wager_refunded': False,
-    'player_disconnected': False
+    'player_disconnected': False,
+    'nonce': None
   }
 
 @app.route('/get-wager', methods=['GET'])
@@ -492,15 +574,8 @@ def handle_get_gas_oracle():
 
 @app.route('/rps-contract-abi', methods=['GET'])
 def get_rps_contract_abi():
-  with open('contracts/RPSContract.json') as f:
+  with open('contracts/RPSContractV2.json') as f:
     return json.load(f)
-
-@socketio.on('heartbeat')
-def handle_heartbeat(data):
-  logger.info('Received heartbeat from client.')
-  logger.info(data)
-  # Emit a response back to the client
-  emit('heartbeat_response', 'pong')
 
 @socketio.on('rpc_error')
 def handle_rpc_error(data):
@@ -663,7 +738,9 @@ def handle_pay_stake_receipt(data):
   if game['player1']['contract_accepted'] and game['player2']['contract_accepted']:
     emit('both_players_accepted_contract', { 'contract_address': RPS_CONTRACT_ADDRESS }, room=game['player2']['player_id'])
     emit('both_players_accepted_contract', { 'contract_address': RPS_CONTRACT_ADDRESS }, room=game['player1']['player_id'])
-    settle_game(game['id'])
+    emit('nonce_requested', game['id'], room=game['player1']['player_id'])
+    emit('nonce_requested', game['id'], room=game['player2']['player_id'])
+    # settle_game(game['id'])
     return
   
   # if the game is over, one player has already rejected the contract, or there were insufficient funds
@@ -958,12 +1035,11 @@ def settle_game(game_id=None):
                                                       player_2_stake_in_wei,
                                                       web3.to_wei(draw_game_fee, 'ether'), 
                                                       game['id']).build_transaction({
-      'from': contract_owner_checksum_address,
-      'nonce': nonce
+      'from': contract_owner_checksum_address
     })
 
     gas_estimate = web3.eth.estimate_gas(gas_estimate_txn)
-    logger.info(f"Gas estimate for payWinner txn: {gas_estimate}")
+    logger.info(f"Gas estimate for payDraw txn: {gas_estimate}")
 
     # Calculate the estimated transaction cost in wei
     est_total_cost_wei = gas_estimate * web3.to_wei(gas_oracle['result']['SafeGasPrice'], 'gwei')
@@ -1013,8 +1089,7 @@ def settle_game(game_id=None):
                                                     player_2_stake_in_wei,
                                                     web3.to_wei(win_game_fee, 'ether'), 
                                                     game['id']).build_transaction({
-      'from': contract_owner_checksum_address,
-      'nonce': nonce
+      'from': contract_owner_checksum_address
     })
 
     gas_estimate = web3.eth.estimate_gas(gas_estimate_txn)
@@ -1106,11 +1181,14 @@ def settle_game(game_id=None):
     game['transactions'].append(web3.to_hex(tx_hash))
   except ValueError as e:
     logger.error(f"A ValueError occurred: {str(e)}")
-    # notify both players there was an error while settling the bet
-    emit('pay_winner_error', room=game['player1']['player_id'])
-    emit('pay_winner_error', room=game['player2']['player_id'])
+    logger.error(f"Error message {e['message']}")
+    if e['message'] != 'already known':
+      # notify both players there was an error while settling the bet
+      emit('pay_winner_error', room=game['player1']['player_id'])
+      emit('pay_winner_error', room=game['player2']['player_id'])
   except Exception as e:
     logger.error(f"An error occurred: {str(e)}")
+    logger.error(f"Message {e['message']}")
     # notify both players there was an error while settling the bet
     emit('pay_winner_error', room=game['player1']['player_id'])
     emit('pay_winner_error', room=game['player2']['player_id'])
