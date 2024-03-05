@@ -71,7 +71,7 @@ txn_logger.addHandler(log_file_handler)
 # Create a parser for the command-line arguments
 # e.g. python your_script.py --env .env.prod
 parser = argparse.ArgumentParser(description='Loads variables from the specified .env file and prints them.')
-parser.add_argument('--env', type=str, default='.env.ganache', help='The .env file to load')
+parser.add_argument('--env', type=str, default='.env.sepolia', help='The .env file to load')
 args = parser.parse_args()
 # Load the .env file specified in the command-line arguments
 load_dotenv(args.env)
@@ -1180,18 +1180,18 @@ def settle_game(game_id=None):
     txn_logger.critical(f"Actual cost in USD to settle game: {total_cost_usd} for transaction hash: {web3.to_hex(tx_hash)}")
     game['transactions'].append(web3.to_hex(tx_hash))
   except ValueError as e:
-    logger.error(f"A ValueError occurred: {str(e)}")
-    logger.error(f"Error message {e['message']}")
     if e['message'] != 'already known':
       # notify both players there was an error while settling the bet
       emit('pay_winner_error', room=game['player1']['player_id'])
       emit('pay_winner_error', room=game['player2']['player_id'])
+    logger.error(f"A ValueError occurred: {str(e)}")
+    logger.error(f"Error message {e['message']}")
   except Exception as e:
-    logger.error(f"An error occurred: {str(e)}")
-    logger.error(f"Message {e['message']}")
     # notify both players there was an error while settling the bet
     emit('pay_winner_error', room=game['player1']['player_id'])
     emit('pay_winner_error', room=game['player2']['player_id'])
+    logger.error(f"An error occurred: {str(e)}")
+    logger.error(f"Message {e['message']}")
   except web3.exceptions.TimeExhausted:
     txn_logger.critical(f"Timed out waiting for transaction receipt for settle_game transaction: {web3.to_hex(tx_hash)}")
   
@@ -1372,10 +1372,14 @@ if __name__ == '__main__':
 
   logger.info('Starting server...')
 
-  http_server = WSGIServer(('0.0.0.0', 443),
-                           app,
-                           keyfile=KEYFILE,
-                           certfile=CERTFILE,
+  # http_server = WSGIServer(('0.0.0.0', 443),
+  #                          app,
+  #                          keyfile=KEYFILE,
+  #                          certfile=CERTFILE,
+  #                          handler_class=WebSocketHandler)
+
+  http_server = WSGIServer(('0.0.0.0', 8080),
+                           app,                        
                            handler_class=WebSocketHandler)
 
   http_server.serve_forever()
