@@ -1179,6 +1179,9 @@ def settle_game(game_id=None):
 
   logger.info(f"Game state before calling payWinner or payDraw: {game}")
 
+  winning_player = None
+  losing_player = None
+
   if game.winner is None and game.loser is None:
     logger.info('Game is a draw.')
     
@@ -1318,7 +1321,7 @@ def settle_game(game_id=None):
     if game.winner is None and game.loser is None:
       txn_logger.critical(f"Game resulted in a draw transaction hash: {web3.to_hex(tx_hash)}, game_id: {game.id}, address: {contract_owner_account.address}, player1: {game.player1_id}, player2: {game.player2_id}")
     else:
-      txn_logger.critical(f"Pay winner transaction hash: {web3.to_hex(tx_hash)}, game_id: {game.id}, address: {contract_owner_account.address}, winner: {winner['address']}, loser: {loser['address']}")
+      txn_logger.critical(f"Pay winner transaction hash: {web3.to_hex(tx_hash)}, game_id: {game.id}, address: {contract_owner_account.address}, winner: {winning_player.address}, loser: {losing_player.address}")
     
     tx_receipt = None
 
